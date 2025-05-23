@@ -12,7 +12,7 @@ if not mongo_uri:
 client = MongoClient(mongo_uri)
 db = client["Movemax"]  # Database name
 users_col = db["User"]  # Collection name
-messages_col = db["messages"]
+messages_col = db["Messages"]
 
 @app.route('/')
 def index():
