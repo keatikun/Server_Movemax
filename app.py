@@ -8,13 +8,21 @@ import time
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")  # async_mode ระบุชัด
 
 mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
 client = MongoClient(mongo_uri)
 db = client["Movemax"]
 users_col = db["User"]
 messages_col = db["Messages"]
+
+# -- Helper สำหรับ emit แบบปลอดภัย --
+def safe_emit(event, data):
+    try:
+        socketio.emit(event, data)
+        print(f"[Emit] {event} -> {data}")
+    except Exception as e:
+        print(f"[Emit Error] {event}: {e}")
 
 @app.route('/users')
 def get_users():
@@ -30,40 +38,36 @@ def get_messages():
         m['_id'] = str(m['_id'])
     return jsonify(messages)
 
+# -- Watch Function ปรับปรุงแล้ว --
 def watch_users_changes():
     pipeline = [{'$match': {'operationType': {'$in': ['insert', 'update', 'replace', 'delete']}}}]
-    stream = users_col.watch(pipeline, full_document='updateLookup')
-    while True:
-        try:
-            change = next(stream)
-            print("User change detected:", change)
-            doc = change.get('fullDocument')
-            if doc:
-                doc['_id'] = str(doc['_id'])
-            socketio.emit('user_update', doc or {})
-        except StopIteration:
-            # ไม่มีข้อมูลใหม่ รอหน่อย
-            time.sleep(0.1)
-        except Exception as e:
-            print("Error in watch_users_changes:", e)
-            time.sleep(1)  # รอแล้วลองใหม่
+    try:
+        with users_col.watch(pipeline, full_document='updateLookup') as stream:
+            for change in stream:
+                print("User change detected:", change)
+                doc = change.get('fullDocument')
+                if doc:
+                    doc['_id'] = str(doc['_id'])
+                safe_emit('user_update', doc or {})
+    except Exception as e:
+        print("Error in watch_users_changes:", e)
+        time.sleep(2)
+        watch_users_changes()  # รีสตาร์ท watcher
 
 def watch_messages_changes():
     pipeline = [{'$match': {'operationType': {'$in': ['insert', 'update', 'replace', 'delete']}}}]
-    stream = messages_col.watch(pipeline, full_document='updateLookup')
-    while True:
-        try:
-            change = next(stream)
-            print("Message change detected:", change)
-            doc = change.get('fullDocument')
-            if doc:
-                doc['_id'] = str(doc['_id'])
-            socketio.emit('messages_update', doc or {})
-        except StopIteration:
-            time.sleep(0.1)
-        except Exception as e:
-            print("Error in watch_messages_changes:", e)
-            time.sleep(1)
+    try:
+        with messages_col.watch(pipeline, full_document='updateLookup') as stream:
+            for change in stream:
+                print("Message change detected:", change)
+                doc = change.get('fullDocument')
+                if doc:
+                    doc['_id'] = str(doc['_id'])
+                safe_emit('messages_update', doc or {})
+    except Exception as e:
+        print("Error in watch_messages_changes:", e)
+        time.sleep(2)
+        watch_messages_changes()  # รีสตาร์ท watcher
 
 @socketio.on('connect')
 def on_connect():
