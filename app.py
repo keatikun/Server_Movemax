@@ -1,53 +1,39 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<title>Real-time Messages</title>
-<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-</head>
-<body>
-<h1>Messages (Real-time)</h1>
-<div id="messages">Loading...</div>
+from flask import Flask, jsonify
+from flask_socketio import SocketIO
+from pymongo import MongoClient
+from threading import Thread
+import os
 
-<script>
-  const socket = io('https://servermovemax-production.up.railway.app');
+app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-  // โหลดข้อมูลเก่าครั้งแรก
-  async function loadMessages() {
-    const res = await fetch('https://servermovemax-production.up.railway.app/messages');
-    const messages = await res.json();
-    updateMessages(messages);
-  }
+mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
+client = MongoClient(mongo_uri)
+db = client["Movemax"]
+messages_col = db["Messages"]
 
-  // แสดงข้อความทั้งหมดใน div
-  function updateMessages(messages) {
-    const container = document.getElementById('messages');
-    container.innerHTML = '';
-    messages.forEach(msg => {
-      container.innerHTML += `
-        <div>
-          <strong>User ID: ${msg.userId || msg.sender || "Unknown"}</strong>
-          <pre>${JSON.stringify(msg.chats || msg.message || {}, null, 2)}</pre>
-          <hr/>
-        </div>
-      `;
-    });
-  }
+@app.route('/messages')
+def get_messages():
+    messages = list(messages_col.find())
+    for msg in messages:
+        msg['_id'] = str(msg['_id'])
+    return jsonify(messages)
 
-  // รอรับข้อความอัพเดตใหม่จาก WebSocket
-  socket.on('message_update', msg => {
-    console.log('New message update:', msg);
+def watch_changes():
+    with messages_col.watch() as stream:
+        for change in stream:
+            full_doc = change.get("fullDocument")
+            if full_doc:
+                full_doc['_id'] = str(full_doc['_id'])
+                socketio.emit('message_update', full_doc)
 
-    // โหลดข้อมูลทั้งหมดใหม่อีกครั้ง หรือ
-    // คุณอาจจะทำแบบเพิ่ม message ทีละตัวก็ได้
-    loadMessages();
-  });
+@socketio.on('connect')
+def on_connect():
+    print("Client connected")
 
-  socket.on('connect', () => {
-    console.log('Connected to WebSocket');
-  });
-
-  loadMessages();
-</script>
-</body>
-</html>
+if __name__ == "__main__":
+    watcher = Thread(target=watch_changes)
+    watcher.daemon = True
+    watcher.start()
+    port = int(os.environ.get("PORT", 8080))
+    socketio.run(app, host="0.0.0.0", port=port)
