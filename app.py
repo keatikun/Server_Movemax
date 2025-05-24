@@ -1,9 +1,9 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from flask_socketio import SocketIO
 from flask_cors import CORS
 from pymongo import MongoClient
-from bson import ObjectId
 from threading import Thread
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -15,56 +15,57 @@ db = client["Movemax"]
 users_col = db["User"]
 messages_col = db["Messages"]
 
-@app.route('/messages', methods=['GET'])
+@app.route('/users')
+def get_users():
+    users = list(users_col.find())
+    for u in users:
+        u['_id'] = str(u['_id'])
+    return jsonify(users)
+
+@app.route('/messages')
 def get_messages():
     messages = list(messages_col.find())
-    for msg in messages:
-        msg['_id'] = str(msg['_id'])
+    for m in messages:
+        m['_id'] = str(m['_id'])
     return jsonify(messages)
 
-@app.route('/messages', methods=['POST'])
-def add_message():
-    data = request.json
-    try:
-        result = messages_col.insert_one(data)
-        return jsonify({'success': True, 'inserted_id': str(result.inserted_id)})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
-
-@app.route('/messages/<message_id>', methods=['PUT'])
-def update_message(message_id):
-    data = request.json
-    try:
-        result = messages_col.update_one(
-            {'_id': ObjectId(message_id)},
-            {'$set': data}
-        )
-        return jsonify({'success': result.modified_count > 0})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
-
-@app.route('/messages/<message_id>', methods=['DELETE'])
-def delete_message(message_id):
-    try:
-        result = messages_col.delete_one({'_id': ObjectId(message_id)})
-        return jsonify({'success': result.deleted_count > 0})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
-
 def watch_changes():
-    with messages_col.watch() as stream:
-        for change in stream:
-            full_doc = change.get('fullDocument')
-            if full_doc:
-                full_doc['_id'] = str(full_doc['_id'])
-                socketio.emit('message_update', full_doc)
+    # เราจะดูทั้ง users และ messages collection
+    pipeline = [{'$match': {'operationType': {'$in': ['insert', 'update', 'replace', 'delete']}}}]
+
+    with users_col.watch(pipeline, full_document='updateLookup') as users_stream, \
+         messages_col.watch(pipeline, full_document='updateLookup') as messages_stream:
+        
+        import select
+        streams = [users_stream, messages_stream]
+
+        while True:
+            # ใช้ select เพื่อตรวจสอบ stream ที่มีข้อมูล
+            ready = select.select(streams, [], [])[0]
+            for stream in ready:
+                change = next(stream)
+                print("Change detected:", change)
+
+                # ส่ง event แจ้ง client ตาม collection ที่เปลี่ยน
+                if stream == users_stream:
+                    doc = change.get('fullDocument')
+                    if doc:
+                        doc['_id'] = str(doc['_id'])
+                    socketio.emit('user_update', doc or {})
+                else:  # messages_stream
+                    doc = change.get('fullDocument')
+                    if doc:
+                        doc['_id'] = str(doc['_id'])
+                    socketio.emit('messages_update', doc or {})
 
 @socketio.on('connect')
 def on_connect():
     print("Client connected")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     watcher_thread = Thread(target=watch_changes)
     watcher_thread.daemon = True
     watcher_thread.start()
-    socketio.run(app, host="0.0.0.0", port=8080)
+
+    port = int(os.environ.get('PORT', 8080))
+    socketio.run(app, host='0.0.0.0', port=port)
