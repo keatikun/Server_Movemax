@@ -1,18 +1,18 @@
 from flask import Flask, jsonify
-from flask_socketio import SocketIO
+from flask_cors import CORS
+from flask_socketio import SocketIO, emit
 from pymongo import MongoClient
-import threading
-import time
 import os
 
 app = Flask(__name__)
+CORS(app)  # อนุญาต CORS ทุก origin
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# MongoDB connection string (แก้ให้ตรงของคุณ)
-mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
+# MongoDB Connection String (ใส่ของจริงตอน deploy)
+mongo_uri = os.getenv("MONGO_URI") or "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
+
 client = MongoClient(mongo_uri)
 db = client["Movemax"]
-
 users_col = db["User"]
 messages_col = db["Messages"]
 
@@ -34,39 +34,25 @@ def get_messages():
         msg['_id'] = str(msg['_id'])
     return jsonify(messages)
 
-def watch_collection_changes(collection, event_name):
-    while True:
-        try:
-            with collection.watch() as stream:
-                print(f"🔍 Watching MongoDB {collection.name} changes...")
-                for change in stream:
-                    print(f"🔔 {collection.name} Change detected:", change)
-                    if change['operationType'] == 'insert':
-                        full_doc = change['fullDocument']
-                        full_doc['_id'] = str(full_doc['_id'])
-                        socketio.emit(event_name, full_doc)
-        except Exception as e:
-            print(f"Error watching {collection.name} change stream:", e)
-            time.sleep(5)
-
-def start_watchers():
-    t_users = threading.Thread(target=watch_collection_changes, args=(users_col, 'new_user'))
-    t_users.daemon = True
-    t_users.start()
-
-    t_messages = threading.Thread(target=watch_collection_changes, args=(messages_col, 'new_message'))
-    t_messages.daemon = True
-    t_messages.start()
-
 @socketio.on('connect')
-def on_connect():
+def handle_connect():
     print("🟢 Client connected")
+    emit('server_response', {'message': 'Connected to WebSocket server'})
 
 @socketio.on('disconnect')
-def on_disconnect():
+def handle_disconnect():
     print("🔴 Client disconnected")
 
+@socketio.on('new_message')
+def handle_new_message(data):
+    print("📩 New message received:", data)
+    if 'sender' in data and 'message' in data:
+        messages_col.insert_one(data)
+        emit('message_broadcast', data, broadcast=True)
+        emit('server_response', {'status': '✅ Message saved'})
+    else:
+        emit('server_response', {'error': '❌ Invalid message format'})
+
 if __name__ == "__main__":
-    start_watchers()
     port = int(os.environ.get("PORT", 8080))
     socketio.run(app, host="0.0.0.0", port=port)
