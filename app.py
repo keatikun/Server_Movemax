@@ -1,15 +1,12 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit
 from pymongo import MongoClient
-import os
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*")  # รองรับ CORS จากทุกที่
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-# เชื่อมต่อ MongoDB Atlas
-mongo_uri = os.getenv("MONGO_URI")
-if not mongo_uri:
-    mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/"  # อย่าลืมใส่ password จริงตอน deploy
+# 🛑 ใช้ลิงก์ MongoDB ตรง ๆ (เฉพาะทดสอบเท่านั้น!)
+mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
 
 client = MongoClient(mongo_uri)
 db = client["Movemax"]
@@ -34,9 +31,9 @@ def get_messages():
         msg['_id'] = str(msg['_id'])
     return jsonify(messages)
 
-# -------------------------------
-# 🔴 WebSocket Events
-# -------------------------------
+@app.route('/test')
+def test_page():
+    return send_from_directory('.', 'test_socket.html')
 
 @socketio.on('connect')
 def handle_connect():
@@ -49,20 +46,13 @@ def handle_disconnect():
 
 @socketio.on('new_message')
 def handle_new_message(data):
-    """
-    ตัวอย่าง: {
-        "sender": "UserA",
-        "message": "Hello"
-    }
-    """
     print("📩 New message received:", data)
     if 'sender' in data and 'message' in data:
         messages_col.insert_one(data)
-        emit('message_broadcast', data, broadcast=True)  # ส่งไปยัง client ทุกคน
+        emit('message_broadcast', data, broadcast=True)
+        emit('server_response', {'status': '✅ Message saved & broadcasted'})
     else:
-        emit('server_response', {'error': 'Invalid message format'})
-
-# -------------------------------
+        emit('server_response', {'error': '❌ Invalid message format'})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
