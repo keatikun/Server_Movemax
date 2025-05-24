@@ -32,23 +32,38 @@ def get_messages():
 
 def watch_users_changes():
     pipeline = [{'$match': {'operationType': {'$in': ['insert', 'update', 'replace', 'delete']}}}]
-    with users_col.watch(pipeline, full_document='updateLookup') as stream:
-        for change in stream:
+    stream = users_col.watch(pipeline, full_document='updateLookup')
+    while True:
+        try:
+            change = next(stream)
             print("User change detected:", change)
             doc = change.get('fullDocument')
             if doc:
                 doc['_id'] = str(doc['_id'])
             socketio.emit('user_update', doc or {})
+        except StopIteration:
+            # ไม่มีข้อมูลใหม่ รอหน่อย
+            time.sleep(0.1)
+        except Exception as e:
+            print("Error in watch_users_changes:", e)
+            time.sleep(1)  # รอแล้วลองใหม่
 
 def watch_messages_changes():
     pipeline = [{'$match': {'operationType': {'$in': ['insert', 'update', 'replace', 'delete']}}}]
-    with messages_col.watch(pipeline, full_document='updateLookup') as stream:
-        for change in stream:
+    stream = messages_col.watch(pipeline, full_document='updateLookup')
+    while True:
+        try:
+            change = next(stream)
             print("Message change detected:", change)
             doc = change.get('fullDocument')
             if doc:
                 doc['_id'] = str(doc['_id'])
             socketio.emit('messages_update', doc or {})
+        except StopIteration:
+            time.sleep(0.1)
+        except Exception as e:
+            print("Error in watch_messages_changes:", e)
+            time.sleep(1)
 
 @socketio.on('connect')
 def on_connect():
