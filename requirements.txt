@@ -1,6 +1,5 @@
-Flask
-pymongo
-python-dotenv
+flask
 flask-socketio
-eventlet
 flask-cors
+pymongo
+eventlet
