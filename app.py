@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch()  # <<< ต้องอยู่บรรทัดบนสุด ก่อน import อื่น ๆ
+
 from flask import Flask, jsonify
 from flask_socketio import SocketIO
 from flask_cors import CORS
@@ -5,12 +8,12 @@ from pymongo import MongoClient
 from threading import Thread
 import os
 import time
-import eventlet
-eventlet.monkey_patch()
 
+# ====== แอป Flask =======
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+
 
 # MongoDB config
 mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
