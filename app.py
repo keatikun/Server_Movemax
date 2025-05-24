@@ -5,18 +5,21 @@ from pymongo import MongoClient
 from threading import Thread
 import os
 import time
+import eventlet
+eventlet.monkey_patch()
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")  # async_mode ระบุชัด
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")  # ใช้ eventlet
 
+# MongoDB Setup
 mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
 client = MongoClient(mongo_uri)
 db = client["Movemax"]
 users_col = db["User"]
 messages_col = db["Messages"]
 
-# -- Helper สำหรับ emit แบบปลอดภัย --
+# Helper emit แบบปลอดภัย
 def safe_emit(event, data):
     try:
         socketio.emit(event, data)
@@ -38,7 +41,7 @@ def get_messages():
         m['_id'] = str(m['_id'])
     return jsonify(messages)
 
-# -- Watch Function ปรับปรุงแล้ว --
+# Watch MongoDB Change Stream
 def watch_users_changes():
     pipeline = [{'$match': {'operationType': {'$in': ['insert', 'update', 'replace', 'delete']}}}]
     try:
@@ -52,7 +55,7 @@ def watch_users_changes():
     except Exception as e:
         print("Error in watch_users_changes:", e)
         time.sleep(2)
-        watch_users_changes()  # รีสตาร์ท watcher
+        watch_users_changes()
 
 def watch_messages_changes():
     pipeline = [{'$match': {'operationType': {'$in': ['insert', 'update', 'replace', 'delete']}}}]
@@ -67,13 +70,14 @@ def watch_messages_changes():
     except Exception as e:
         print("Error in watch_messages_changes:", e)
         time.sleep(2)
-        watch_messages_changes()  # รีสตาร์ท watcher
+        watch_messages_changes()
 
 @socketio.on('connect')
 def on_connect():
     print("Client connected")
 
 if __name__ == '__main__':
+    # Start background threads
     user_thread = Thread(target=watch_users_changes)
     user_thread.daemon = True
     user_thread.start()
@@ -83,4 +87,4 @@ if __name__ == '__main__':
     message_thread.start()
 
     port = int(os.environ.get('PORT', 8080))
-    socketio.run(app, host='0.0.0.0', port=port)
+    socketio.run(app, host='0.0.0.0', port=port)  # ใช้ eventlet แล้ว ไม่ต้องใส่ allow_unsafe_werkzeug
