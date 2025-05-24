@@ -5,6 +5,8 @@ from threading import Thread
 import os
 
 app = Flask(__name__)
+# เปิด CORS ให้กับ REST API
+CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
