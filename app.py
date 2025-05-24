@@ -21,6 +21,13 @@ def get_users():
         user['_id'] = str(user['_id'])
     return jsonify(users)
 
+@app.route('/messages')
+def get_messages():
+    messages = list(messages_col.find())
+    for msg in messages:
+        msg['_id'] = str(msg['_id'])
+    return jsonify(messages)
+
 @app.route('/add_chat', methods=['POST'])
 def add_chat():
     data = request.json
