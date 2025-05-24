@@ -1,22 +1,22 @@
 import eventlet
-eventlet.monkey_patch()  # <<< ต้องอยู่บรรทัดบนสุด ก่อน import อื่น ๆ
+eventlet.monkey_patch()  # ต้องอยู่บรรทัดบนสุดก่อน import อื่นๆ
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_socketio import SocketIO
 from flask_cors import CORS
 from pymongo import MongoClient
 from threading import Thread
 import os
 import time
+from bson.objectid import ObjectId
 
-# ====== แอป Flask =======
+# ====== Flask app =======
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
-
 # MongoDB config
-mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
+mongo_uri = "mongodb+srv://Keatikun:@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
 client = MongoClient(mongo_uri)
 db = client["Movemax"]
 users_col = db["User"]
@@ -30,7 +30,7 @@ def safe_emit(event, data):
     except Exception as e:
         print(f"[Emit Error] {event}: {e}")
 
-# API ดึง users ทั้งหมด
+# --- API ดึง users ทั้งหมด ---
 @app.route('/users')
 def get_users():
     users = list(users_col.find())
@@ -38,7 +38,7 @@ def get_users():
         u['_id'] = str(u['_id'])
     return jsonify(users)
 
-# API ดึง messages ทั้งหมด
+# --- API ดึง messages ทั้งหมด ---
 @app.route('/messages')
 def get_messages():
     messages = list(messages_col.find())
@@ -46,7 +46,76 @@ def get_messages():
         m['_id'] = str(m['_id'])
     return jsonify(messages)
 
-# Watch Users Change Stream
+# --- เพิ่มข้อความใหม่ ---
+@app.route('/messages', methods=['POST'])
+def add_message():
+    data = request.json
+    if not data or not all(k in data for k in ('senderId', 'receiverId', 'text')):
+        return jsonify({'error': 'Missing fields'}), 400
+
+    new_msg = {
+        'senderId': int(data['senderId']),
+        'receiverId': int(data['receiverId']),
+        'text': data['text'],
+        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'isRead': False
+    }
+    result = messages_col.insert_one(new_msg)
+    new_msg['_id'] = str(result.inserted_id)
+
+    safe_emit('messages_update', new_msg)
+    return jsonify(new_msg), 201
+
+# --- อัปเดตข้อความ ---
+@app.route('/messages/<msg_id>', methods=['PUT'])
+def update_message(msg_id):
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data to update'}), 400
+
+    try:
+        obj_id = ObjectId(msg_id)
+    except Exception:
+        return jsonify({'error': 'Invalid message ID'}), 400
+
+    update_data = {}
+    if 'text' in data:
+        update_data['text'] = data['text']
+    if 'isRead' in data:
+        update_data['isRead'] = data['isRead']
+
+    if not update_data:
+        return jsonify({'error': 'No valid fields to update'}), 400
+
+    result = messages_col.find_one_and_update(
+        {'_id': obj_id},
+        {'$set': update_data},
+        return_document=True
+    )
+
+    if not result:
+        return jsonify({'error': 'Message not found'}), 404
+
+    result['_id'] = str(result['_id'])
+    safe_emit('messages_update', result)
+    return jsonify(result)
+
+# --- ลบข้อความ ---
+@app.route('/messages/<msg_id>', methods=['DELETE'])
+def delete_message(msg_id):
+    try:
+        obj_id = ObjectId(msg_id)
+    except Exception:
+        return jsonify({'error': 'Invalid message ID'}), 400
+
+    result = messages_col.delete_one({'_id': obj_id})
+    if result.deleted_count == 0:
+        return jsonify({'error': 'Message not found'}), 404
+
+    safe_emit('messages_delete', {'_id': msg_id})
+    return jsonify({'result': 'Message deleted'}), 200
+
+# --- MongoDB Change Stream watcher for users ---
 def watch_users_changes():
     with app.app_context():
         pipeline = [{'$match': {'operationType': {'$in': ['insert', 'update', 'replace', 'delete']}}}]
@@ -61,9 +130,9 @@ def watch_users_changes():
         except Exception as e:
             print("Error in watch_users_changes:", e)
             time.sleep(2)
-            watch_users_changes()  # restart watcher
+            watch_users_changes()  # restart watcher on error
 
-# Watch Messages Change Stream
+# --- MongoDB Change Stream watcher for messages ---
 def watch_messages_changes():
     with app.app_context():
         pipeline = [{'$match': {'operationType': {'$in': ['insert', 'update', 'replace', 'delete']}}}]
@@ -78,14 +147,14 @@ def watch_messages_changes():
         except Exception as e:
             print("Error in watch_messages_changes:", e)
             time.sleep(2)
-            watch_messages_changes()  # restart watcher
+            watch_messages_changes()  # restart watcher on error
 
 @socketio.on('connect')
 def on_connect():
     print("Client connected")
 
 if __name__ == '__main__':
-    # Start MongoDB watchers
+    # Start MongoDB watchers on threads
     user_thread = Thread(target=watch_users_changes)
     user_thread.daemon = True
     user_thread.start()
