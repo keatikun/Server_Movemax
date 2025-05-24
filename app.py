@@ -1,11 +1,13 @@
 from flask import Flask, jsonify
 from flask_socketio import SocketIO, emit
+from flask_cors import CORS
 from pymongo import MongoClient
 from threading import Thread
 import os
-import json
 
 app = Flask(__name__)
+CORS(app)  # เปิด CORS สำหรับทุกที่
+
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
@@ -28,14 +30,11 @@ def get_messages():
         msg['_id'] = str(msg['_id'])
     return jsonify(messages)
 
-# Background thread for watching change streams
 def watch_changes():
     with messages_col.watch() as stream:
         for change in stream:
             full_doc = change.get("fullDocument")
-            # ส่งเฉพาะถ้าเป็น chat structure (มี userId และ chats)
             if full_doc and "userId" in full_doc and "chats" in full_doc:
-                # แปลง _id ObjectId เป็น string ก่อนส่ง
                 full_doc['_id'] = str(full_doc['_id'])
                 socketio.emit('chat_update', full_doc)
 
@@ -44,7 +43,6 @@ def on_connect():
     print("Client connected")
 
 if __name__ == "__main__":
-    # Start the background thread to watch MongoDB changes
     watcher_thread = Thread(target=watch_changes)
     watcher_thread.daemon = True
     watcher_thread.start()
