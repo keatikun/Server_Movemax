@@ -13,6 +13,7 @@ mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retry
 client = MongoClient(mongo_uri)
 db = client["Movemax"]
 users_col = db["User"]
+messages_col = db["Messages"]
 
 @app.route('/users', methods=['GET'])
 def get_users():
