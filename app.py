@@ -1,22 +1,19 @@
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+from flask import Flask, request, jsonify
 from flask_socketio import SocketIO
+from flask_cors import CORS
 from pymongo import MongoClient
+from bson import ObjectId
 from threading import Thread
-import os
 
 app = Flask(__name__)
-CORS(app)  # เปิด CORS ให้ REST API
-socketio = SocketIO(app, cors_allowed_origins="*")  # เปิด CORS ให้ WebSocket
+CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-# เชื่อม MongoDB
 mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
 client = MongoClient(mongo_uri)
 db = client["Movemax"]
 users_col = db["User"]
-messages_col = db["Messages"]
 
-# REST API ดึงข้อมูล users
 @app.route('/users', methods=['GET'])
 def get_users():
     users = list(users_col.find())
@@ -24,42 +21,75 @@ def get_users():
         user['_id'] = str(user['_id'])
     return jsonify(users)
 
-# REST API ดึงข้อมูล messages
-@app.route('/messages', methods=['GET'])
-def get_messages():
-    messages = list(messages_col.find())
-    for msg in messages:
-        msg['_id'] = str(msg['_id'])
-    return jsonify(messages)
+@app.route('/add_chat', methods=['POST'])
+def add_chat():
+    data = request.json
+    user_id = data.get('userId')
+    new_chat = data.get('chat')
+    try:
+        users_col.update_one(
+            {'_id': ObjectId(user_id)},
+            {'$push': {'chats': new_chat}}
+        )
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
-# ฟังก์ชันฟัง MongoDB Change Streams แบบ real-time
+@app.route('/update_chat', methods=['POST'])
+def update_chat():
+    data = request.json
+    user_id = data.get('userId')
+    index = data.get('chatIndex')
+    new_text = data.get('newText')
+    is_typing = data.get('isTyping')
+    try:
+        users_col.update_one(
+            {'_id': ObjectId(user_id)},
+            {
+                '$set': {
+                    f'chats.{index}.lastMessage.text': new_text,
+                    f'chats.{index}.isTyping': is_typing
+                }
+            }
+        )
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/delete_chat', methods=['POST'])
+def delete_chat():
+    data = request.json
+    user_id = data.get('userId')
+    index = data.get('chatIndex')
+    try:
+        user = users_col.find_one({'_id': ObjectId(user_id)})
+        if user and 'chats' in user and len(user['chats']) > index:
+            user['chats'].pop(index)
+            users_col.update_one(
+                {'_id': ObjectId(user_id)},
+                {'$set': {'chats': user['chats']}}
+            )
+            return jsonify({'success': True})
+        else:
+            return jsonify({'success': False, 'error': 'Invalid index'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+# Change Stream to broadcast real-time updates
 def watch_changes():
-    with messages_col.watch() as stream:
+    with users_col.watch() as stream:
         for change in stream:
-            op_type = change['operationType']
-            full_doc = change.get('fullDocument')
-            doc_id = str(change['documentKey']['_id'])
-
-            # ส่งข้อมูลผ่าน WebSocket event ตามประเภทการเปลี่ยนแปลง
-            if op_type == 'insert':
-                socketio.emit('message_insert', {'_id': doc_id, 'fullDocument': full_doc})
-            elif op_type == 'update':
-                # full_doc อาจไม่อยู่ถ้าเป็น update partial ต้อง query ใหม่
-                if not full_doc:
-                    full_doc = messages_col.find_one({'_id': change['documentKey']['_id']})
-                socketio.emit('message_update', {'_id': doc_id, 'fullDocument': full_doc})
-            elif op_type == 'delete':
-                socketio.emit('message_delete', {'_id': doc_id})
+            full_doc = change.get("fullDocument")
+            if full_doc and "userId" in full_doc:
+                full_doc['_id'] = str(full_doc['_id'])
+                socketio.emit('chat_update', full_doc)
 
 @socketio.on('connect')
 def on_connect():
-    print("Client connected")
+    print("🟢 WebSocket client connected")
 
 if __name__ == '__main__':
-    # Start MongoDB watcher thread
     watcher_thread = Thread(target=watch_changes)
     watcher_thread.daemon = True
     watcher_thread.start()
-
-    port = int(os.environ.get("PORT", 8080))
-    socketio.run(app, host='0.0.0.0', port=port)
+    socketio.run(app, host='0.0.0.0', port=8080)
