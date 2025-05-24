@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit
 from pymongo import MongoClient
+import os 
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
