@@ -1,13 +1,13 @@
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify
 from flask_socketio import SocketIO, emit
 from pymongo import MongoClient
-import os 
+import os
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# 🛑 ใช้ลิงก์ MongoDB ตรง ๆ (เฉพาะทดสอบเท่านั้น!)
-mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
+# MongoDB URI (แก้เป็นของคุณเอง)
+mongo_uri = os.getenv("MONGO_URI") or "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
 
 client = MongoClient(mongo_uri)
 db = client["Movemax"]
@@ -32,9 +32,7 @@ def get_messages():
         msg['_id'] = str(msg['_id'])
     return jsonify(messages)
 
-@app.route('/test')
-def test_page():
-    return send_from_directory('.', 'test_socket.html')
+# —————— WebSocket Events ——————
 
 @socketio.on('connect')
 def handle_connect():
@@ -45,11 +43,26 @@ def handle_connect():
 def handle_disconnect():
     print("🔴 Client disconnected")
 
+@socketio.on('request_users')
+def send_users():
+    users = list(users_col.find())
+    for user in users:
+        user['_id'] = str(user['_id'])
+    emit('users_update', users)
+
+@socketio.on('request_messages')
+def send_messages():
+    messages = list(messages_col.find())
+    for msg in messages:
+        msg['_id'] = str(msg['_id'])
+    emit('messages_update', messages)
+
 @socketio.on('new_message')
 def handle_new_message(data):
     print("📩 New message received:", data)
     if 'sender' in data and 'message' in data:
         messages_col.insert_one(data)
+        # ส่งข้อมูล message ใหม่ให้ client ทุกคน
         emit('message_broadcast', data, broadcast=True)
         emit('server_response', {'status': '✅ Message saved & broadcasted'})
     else:
