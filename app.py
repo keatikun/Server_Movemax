@@ -113,7 +113,38 @@ def add_message():
     result = messages_col.insert_one(new_msg)
     new_msg['_id'] = str(result.inserted_id)
 
-    safe_emit('messages_update', new_msg)
+    # อัพเดต chat list ของทั้งผู้ส่งและผู้รับ
+    last_msg_preview = new_msg['text'][:50]  # ตัดข้อความยาวๆ
+    last_msg_timestamp = new_msg['timestamp']
+
+    # สมมติ chats_col เก็บข้อมูลแชท list
+    chats_col.update_one(
+        {'userId': new_msg['senderId'], 'contactId': new_msg['receiverId']},
+        {'$set': {
+            'lastMessage': last_msg_preview,
+            'timestamp': last_msg_timestamp,
+            'isRead': True  # ผู้ส่งอ่านแล้ว
+        }},
+        upsert=True
+    )
+
+    chats_col.update_one(
+        {'userId': new_msg['receiverId'], 'contactId': new_msg['senderId']},
+        {'$set': {
+            'lastMessage': last_msg_preview,
+            'timestamp': last_msg_timestamp,
+            'isRead': False  # ผู้รับยังไม่อ่าน
+        }},
+        upsert=True
+    )
+
+    # ส่งข้อมูลแจ้งผ่าน Socket ให้ผู้ใช้สองคน
+    safe_emit('messages_update', {
+        'senderId': new_msg['senderId'],
+        'receiverId': new_msg['receiverId'],
+        'message': new_msg
+    })
+
     return jsonify(new_msg), 201
 
 # --- อัปเดตข้อความ ---
