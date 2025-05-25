@@ -67,6 +67,29 @@ def get_chat_messages():
 
     return jsonify(chat)
 
+# ---  chat list ของ userId ที่ส่งมา --- #
+@app.route('/chat-list')
+def get_chat_list():
+    try:
+        user_id = int(request.args.get('userId'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid or missing userId'}), 400
+
+    user_doc = messages_col.find_one({"userId": user_id})
+    if not user_doc or 'chats' not in user_doc:
+        return jsonify([])  # ไม่มี chat list
+
+    # chats คือ list ของ chat ทั้งหมดของ user นี้
+    chat_list = user_doc['chats']
+
+    # แปลง ObjectId ให้เป็น string ถ้ามี (ในกรณีเก็บ ObjectId)
+    for chat in chat_list:
+        if '_id' in chat:
+            chat['_id'] = str(chat['_id'])
+
+    return jsonify(chat_list)
+
+
 # --- เพิ่มข้อความใหม่ ---
 @app.route('/messages', methods=['POST'])
 def add_message():
