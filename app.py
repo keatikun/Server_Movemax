@@ -77,17 +77,23 @@ def get_chat_list():
 
     user_doc = messages_col.find_one({"userId": user_id})
     if not user_doc or 'chats' not in user_doc:
-        return jsonify([])  # ไม่มี chat list
+        return jsonify([])
 
-    # chats คือ list ของ chat ทั้งหมดของ user นี้
-    chat_list = user_doc['chats']
-
-    # แปลง ObjectId ให้เป็น string ถ้ามี (ในกรณีเก็บ ObjectId)
-    for chat in chat_list:
-        if '_id' in chat:
-            chat['_id'] = str(chat['_id'])
+    chat_list = []
+    for chat in user_doc['chats']:
+        contact_id = chat['contactId']
+        last_message = chat.get('lastMessage', {})
+        chat_list.append({
+            'contactId': contact_id,
+            'contactName': chat.get('contactName', ''),
+            'lastMessage': last_message.get('text', ''),
+            'timestamp': last_message.get('timestamp', ''),
+            'isRead': last_message.get('isRead', False),
+        })
 
     return jsonify(chat_list)
+
+
 
 
 # --- เพิ่มข้อความใหม่ ---
