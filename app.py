@@ -49,26 +49,31 @@ def get_messages():
 # --- API ดึง Chat 1:1---
 @app.route('/chat-messages')
 def get_chat_messages():
+    user_id = request.args.get('userId')
+    contact_id = request.args.get('contactId')
+
+    if not user_id or not contact_id:
+        return jsonify({'error': 'Missing userId or contactId'}), 400
+
+    # พยายามแปลงเป็น int ถ้าแปลงไม่ได้ก็ใช้เป็น string เลย
     try:
-        user_id = int(request.args.get('userId'))
-        contact_id = int(request.args.get('contactId'))
-    except (TypeError, ValueError):
-        return jsonify({'error': 'Invalid or missing userId/contactId'}), 400
+        user_id = int(user_id)
+        contact_id = int(contact_id)
+    except ValueError:
+        pass  # ใช้เป็น string
 
-    # หาเอกสาร userId
-    user_doc = users_col.find_one({'userId': user_id})
-    if not user_doc:
-        return jsonify([])
+    messages = list(messages_col.find({
+        '$or': [
+            {'senderId': user_id, 'receiverId': contact_id},
+            {'senderId': contact_id, 'receiverId': user_id}
+        ]
+    }).sort('timestamp', 1))
 
-    # หา chat ที่ contactId ตรงกับที่ขอ
-    chats = user_doc.get('chats', [])
-    chat_with_contact = next((chat for chat in chats if chat['contactId'] == contact_id), None)
+    for m in messages:
+        m['_id'] = str(m['_id'])
 
-    if not chat_with_contact:
-        return jsonify([])
+    return jsonify(messages)
 
-    # คืนข้อมูล chat นั้นกลับไป (อาจจะคืน lastMessage หรือตามต้องการ)
-    return jsonify(chat_with_contact)
 
 
 # --- เพิ่มข้อความใหม่ ---
