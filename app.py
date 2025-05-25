@@ -9,6 +9,7 @@ from threading import Thread
 import os
 import time
 from bson.objectid import ObjectId
+import json  # ✅ เพิ่มสำหรับ safe_emit
 
 # ====== Flask app =======
 app = Flask(__name__)
@@ -16,17 +17,18 @@ CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # MongoDB config
-mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
+mongo_uri = "mongodb+srv://Keatikun:@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
 client = MongoClient(mongo_uri)
 db = client["Movemax"]
 users_col = db["User"]
 messages_col = db["Messages"]
 
-# Emit อย่างปลอดภัย
+# ✅ Emit อย่างปลอดภัย (แก้ให้ข้อมูล clean)
 def safe_emit(event, data):
     try:
-        socketio.emit(event, data)
-        print(f"[Emit] {event} -> {data}")
+        clean_data = json.loads(json.dumps(data, ensure_ascii=False))
+        socketio.emit(event, clean_data)
+        print(f"[Emit] {event} -> {json.dumps(clean_data, ensure_ascii=False)}")
     except Exception as e:
         print(f"[Emit Error] {event}: {e}")
 
@@ -46,7 +48,7 @@ def get_messages():
         m['_id'] = str(m['_id'])
     return jsonify(messages)
 
-# --- API ดึง Chat 1:1---
+# --- API ดึง Chat 1:1 ---
 @app.route('/chat-messages')
 def get_chat_messages():
     try:
@@ -55,7 +57,6 @@ def get_chat_messages():
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid or missing userId/contactId'}), 400
 
-    # สมมุติว่า collection นี้คือ messages_col
     user_doc = messages_col.find_one({"userId": user_id})
     if not user_doc or 'chats' not in user_doc:
         return jsonify([])
@@ -65,9 +66,6 @@ def get_chat_messages():
         return jsonify([])
 
     return jsonify(chat)
-
-
-
 
 # --- เพิ่มข้อความใหม่ ---
 @app.route('/messages', methods=['POST'])
@@ -153,7 +151,7 @@ def watch_users_changes():
         except Exception as e:
             print("Error in watch_users_changes:", e)
             time.sleep(2)
-            watch_users_changes()  # restart watcher on error
+            watch_users_changes()
 
 # --- MongoDB Change Stream watcher for messages ---
 def watch_messages_changes():
@@ -170,14 +168,13 @@ def watch_messages_changes():
         except Exception as e:
             print("Error in watch_messages_changes:", e)
             time.sleep(2)
-            watch_messages_changes()  # restart watcher on error
+            watch_messages_changes()
 
 @socketio.on('connect')
 def on_connect():
     print("Client connected")
 
 if __name__ == '__main__':
-    # Start MongoDB watchers on threads
     user_thread = Thread(target=watch_users_changes)
     user_thread.daemon = True
     user_thread.start()
