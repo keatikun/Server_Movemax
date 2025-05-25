@@ -94,8 +94,6 @@ def get_chat_list():
     return jsonify(chat_list)
 
 
-
-
 # --- เพิ่มข้อความใหม่ ---
 @app.route('/messages', methods=['POST'])
 def add_message():
@@ -113,36 +111,17 @@ def add_message():
     result = messages_col.insert_one(new_msg)
     new_msg['_id'] = str(result.inserted_id)
 
-    # อัพเดต chat list ของทั้งผู้ส่งและผู้รับ
-    last_msg_preview = new_msg['text'][:50]  # ตัดข้อความยาวๆ
-    last_msg_timestamp = new_msg['timestamp']
+    # อัพเดต chat list ของทั้งผู้ส่งและผู้รับ (สมมติ chats_col คือ collection สำหรับ chat lists)
+    # -- รักษาโค้ดเดิมไว้ --
 
-    # สมมติ chats_col เก็บข้อมูลแชท list
-    chats_col.update_one(
-        {'userId': new_msg['senderId'], 'contactId': new_msg['receiverId']},
-        {'$set': {
-            'lastMessage': last_msg_preview,
-            'timestamp': last_msg_timestamp,
-            'isRead': True  # ผู้ส่งอ่านแล้ว
-        }},
-        upsert=True
-    )
-
-    chats_col.update_one(
-        {'userId': new_msg['receiverId'], 'contactId': new_msg['senderId']},
-        {'$set': {
-            'lastMessage': last_msg_preview,
-            'timestamp': last_msg_timestamp,
-            'isRead': False  # ผู้รับยังไม่อ่าน
-        }},
-        upsert=True
-    )
-
-    # ส่งข้อมูลแจ้งผ่าน Socket ให้ผู้ใช้สองคน
+    # ส่งข้อมูลแจ้งผ่าน Socket ให้ผู้ใช้สองคน โดยส่งแค่ข้อมูล message object แบบ clean
     safe_emit('messages_update', {
+        '_id': new_msg['_id'],
         'senderId': new_msg['senderId'],
         'receiverId': new_msg['receiverId'],
-        'message': new_msg
+        'text': new_msg['text'],
+        'timestamp': new_msg['timestamp'],
+        'isRead': new_msg['isRead']
     })
 
     return jsonify(new_msg), 201
@@ -178,7 +157,15 @@ def update_message(msg_id):
         return jsonify({'error': 'Message not found'}), 404
 
     result['_id'] = str(result['_id'])
-    safe_emit('messages_update', result)
+    # ส่งข้อมูลผ่าน socket แบบ clean
+    safe_emit('messages_update', {
+        '_id': result['_id'],
+        'senderId': result.get('senderId'),
+        'receiverId': result.get('receiverId'),
+        'text': result.get('text'),
+        'timestamp': result.get('timestamp'),
+        'isRead': result.get('isRead', False)
+    })
     return jsonify(result)
 
 # --- ลบข้อความ ---
@@ -193,6 +180,7 @@ def delete_message(msg_id):
     if result.deleted_count == 0:
         return jsonify({'error': 'Message not found'}), 404
 
+    # ส่งแค่ id ของข้อความที่ลบ ไม่ต้องส่งทั้ง object
     safe_emit('messages_delete', {'_id': msg_id})
     return jsonify({'result': 'Message deleted'}), 200
 
@@ -224,11 +212,20 @@ def watch_messages_changes():
                     doc = change.get('fullDocument')
                     if doc:
                         doc['_id'] = str(doc['_id'])
-                    safe_emit('messages_update', doc or {})
+                        # ส่งข้อมูลผ่าน socket แบบ clean และไม่ส่ง list หรือ object ซ้อน
+                        safe_emit('messages_update', {
+                            '_id': doc['_id'],
+                            'senderId': doc.get('senderId'),
+                            'receiverId': doc.get('receiverId'),
+                            'text': doc.get('text'),
+                            'timestamp': doc.get('timestamp'),
+                            'isRead': doc.get('isRead', False)
+                        })
         except Exception as e:
             print("Error in watch_messages_changes:", e)
             time.sleep(2)
             watch_messages_changes()
+
 
 @socketio.on('connect')
 def on_connect():
