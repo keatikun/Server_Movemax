@@ -55,17 +55,21 @@ def get_chat_messages():
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid or missing userId/contactId'}), 400
 
-    # ดึงข้อความที่ sender หรือ receiver เป็น user_id กับ contact_id
-    messages = list(messages_col.find({
-        '$or': [
-            {'senderId': user_id, 'receiverId': contact_id},
-            {'senderId': contact_id, 'receiverId': user_id}
-        ]
-    }).sort('timestamp', 1))  # เรียงตามเวลาขึ้น
+    # หาเอกสาร userId
+    user_doc = users_col.find_one({'userId': user_id})
+    if not user_doc:
+        return jsonify([])
 
-    for m in messages:
-        m['_id'] = str(m['_id'])
-    return jsonify(messages)
+    # หา chat ที่ contactId ตรงกับที่ขอ
+    chats = user_doc.get('chats', [])
+    chat_with_contact = next((chat for chat in chats if chat['contactId'] == contact_id), None)
+
+    if not chat_with_contact:
+        return jsonify([])
+
+    # คืนข้อมูล chat นั้นกลับไป (อาจจะคืน lastMessage หรือตามต้องการ)
+    return jsonify(chat_with_contact)
+
 
 # --- เพิ่มข้อความใหม่ ---
 @app.route('/messages', methods=['POST'])
