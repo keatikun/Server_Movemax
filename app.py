@@ -55,19 +55,17 @@ def get_chat_messages():
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid or missing userId/contactId'}), 400
 
-    # ดึงเอกสาร user ที่มี userId
+    # สมมุติว่า collection นี้คือ messages_col
     user_doc = messages_col.find_one({"userId": user_id})
     if not user_doc or 'chats' not in user_doc:
         return jsonify([])
 
-    # หา chat ที่มี contactId ตรงกับ contact_id
     chat = next((c for c in user_doc['chats'] if c['contactId'] == contact_id), None)
-
     if not chat:
         return jsonify([])
 
-    # ส่ง chat กลับ (หรือจะเลือกส่งเฉพาะ lastMessage, chat history ก็ได้)
     return jsonify(chat)
+
 
 
 
