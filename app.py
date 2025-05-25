@@ -46,6 +46,27 @@ def get_messages():
         m['_id'] = str(m['_id'])
     return jsonify(messages)
 
+# --- API ดึง Chat 1:1---
+@app.route('/chat-messages')
+def get_chat_messages():
+    try:
+        user_id = int(request.args.get('userId'))
+        contact_id = int(request.args.get('contactId'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid or missing userId/contactId'}), 400
+
+    # ดึงข้อความที่ sender หรือ receiver เป็น user_id กับ contact_id
+    messages = list(messages_col.find({
+        '$or': [
+            {'senderId': user_id, 'receiverId': contact_id},
+            {'senderId': contact_id, 'receiverId': user_id}
+        ]
+    }).sort('timestamp', 1))  # เรียงตามเวลาขึ้น
+
+    for m in messages:
+        m['_id'] = str(m['_id'])
+    return jsonify(messages)
+
 # --- เพิ่มข้อความใหม่ ---
 @app.route('/messages', methods=['POST'])
 def add_message():
