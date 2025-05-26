@@ -111,9 +111,36 @@ def add_message():
     result = messages_col.insert_one(new_msg)
     new_msg['_id'] = str(result.inserted_id)
 
-    # อัพเดต chat list ของทั้งผู้ส่งและผู้รับ (สมมติ chats_col คือ collection สำหรับ chat lists)
-    # -- รักษาโค้ดเดิมไว้ --
-
+    # --- อัพเดต chat list ใน collection messages_col (ถ้ามี chat list เก็บไว้) ---
+    # สมมติ structure: มี document แยก userId เก็บ chat list
+    # update lastMessage ให้กับทั้ง sender และ receiver
+    for user_id, contact_id in [(new_msg['senderId'], new_msg['receiverId']), (new_msg['receiverId'], new_msg['senderId'])]:
+        messages_col.update_one(
+            {'userId': user_id, 'chats.contactId': contact_id},
+            {'$set': {
+                'chats.$.lastMessage': {
+                    'text': new_msg['text'],
+                    'timestamp': new_msg['timestamp'],
+                    'isRead': new_msg['isRead'] if user_id == new_msg['receiverId'] else True
+                }
+            }}
+        )
+        # กรณีไม่มี chat นี้ใน list ให้เพิ่มเข้าไป (upsert แบบบางกรณี)
+        messages_col.update_one(
+            {'userId': user_id, 'chats.contactId': {'$ne': contact_id}},
+            {'$push': {'chats': {
+                'contactId': contact_id,
+                'contactName': '',  # อาจต้องดึงชื่อจาก users_col หรืออื่น ๆ เพิ่ม
+                'contactIsOnline': False,
+                'isTyping': False,
+                'lastMessage': {
+                    'text': new_msg['text'],
+                    'timestamp': new_msg['timestamp'],
+                    'isRead': new_msg['isRead'] if user_id == new_msg['receiverId'] else True
+                }
+            }}},
+            upsert=True
+        )
     # ส่งข้อมูลแจ้งผ่าน Socket ให้ผู้ใช้สองคน โดยส่งแค่ข้อมูล message object แบบ clean
     safe_emit('messages_update', {
         '_id': new_msg['_id'],
