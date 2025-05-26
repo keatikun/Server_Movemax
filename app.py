@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch()
+
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, join_room, leave_room, emit
 from pymongo import MongoClient
@@ -5,7 +8,6 @@ from bson import ObjectId
 from dotenv import load_dotenv
 import datetime
 import os
-import eventlet
 
 # โหลด environment variables
 load_dotenv()
@@ -14,7 +16,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'fallback_secret_key')  # fallback เผื่อไม่มีใน env
 
 # เปิดใช้ WebSocket และเปิด CORS
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # เชื่อมต่อ MongoDB
 mongo_uri = os.getenv("MONGO_URI")
@@ -54,7 +56,6 @@ def get_users():
     return jsonify([serialize_user(u) for u in users])
 
 # === WebSocket Events ===
-
 @socketio.on('connect_user')
 def connect_user(data):
     userId = data.get('userId')
@@ -121,8 +122,6 @@ def send_message(data):
     emit('new_message', serialize_message(message), room=chat_id)
 
 # === Start Server ===
-eventlet.monkey_patch()
-
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
     socketio.run(app, host='0.0.0.0', port=port)
