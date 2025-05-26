@@ -20,7 +20,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 mongo_uri = "mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority"
 client = MongoClient(mongo_uri)
 db = client["Movemax"]
-users_col = db["User"]
+users_col = db["Chats"]
 messages_col = db["Messages"]
 
 # ✅ Emit อย่างปลอดภัย (แก้ให้ข้อมูล clean)
