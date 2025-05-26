@@ -5,6 +5,7 @@ from bson import ObjectId
 from dotenv import load_dotenv
 import datetime
 import os
+import eventlet
 
 # โหลด environment variables
 load_dotenv()
@@ -120,6 +121,8 @@ def send_message(data):
     emit('new_message', serialize_message(message), room=chat_id)
 
 # === Start Server ===
+eventlet.monkey_patch()
+
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 8080))  # Railway uses PORT env
+    port = int(os.environ.get("PORT", 8080))
     socketio.run(app, host='0.0.0.0', port=port)
