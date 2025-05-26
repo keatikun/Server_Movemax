@@ -2,20 +2,28 @@ from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, join_room, leave_room, emit
 from pymongo import MongoClient
 from bson import ObjectId
+from dotenv import load_dotenv
 import datetime
+import os
+
+# โหลด environment variables
+load_dotenv()
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your_secret_key'
-socketio = SocketIO(app, cors_allowed_origins="*")
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'fallback_secret_key')  # fallback เผื่อไม่มีใน env
 
-# เชื่อมต่อ MongoDB (แก้ URI ให้ตรงกับของคุณ)
-client = MongoClient("mongodb+srv://Keatikun:Ong10ๅ0647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority")
+# เปิดใช้ WebSocket และเปิด CORS
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
+# เชื่อมต่อ MongoDB
+mongo_uri = os.getenv("MONGO_URI")
+client = MongoClient(mongo_uri)
 db = client.mydatabase
 users_col = db.users
 chats_col = db.chats
 messages_col = db.messages
 
-# ฟังก์ชันช่วยแปลง ObjectId เป็น string และแปลงวันที่
+# === Helper Functions ===
 def serialize_user(user):
     return {
         "id": str(user["_id"]),
@@ -38,34 +46,29 @@ def serialize_message(msg):
         "type": msg.get("type", "text")
     }
 
-# REST API: ดึง user list
+# === REST API ===
 @app.route('/api/users', methods=['GET'])
 def get_users():
     users = list(users_col.find())
     return jsonify([serialize_user(u) for u in users])
 
-# WebSocket: ผู้ใช้เชื่อมต่อ แจ้งตัวตน (userId)
+# === WebSocket Events ===
+
 @socketio.on('connect_user')
 def connect_user(data):
     userId = data.get('userId')
     if not userId:
         return
-
-    # อัปเดตสถานะออนไลน์ และ lastSeen
     users_col.update_one(
         {"userId": userId},
         {"$set": {"isOnline": True, "lastSeen": datetime.datetime.utcnow()}}
     )
     emit('user_status', {"userId": userId, "isOnline": True}, broadcast=True)
 
-# WebSocket: ผู้ใช้ disconnect อัปเดตสถานะออฟไลน์
 @socketio.on('disconnect')
 def on_disconnect():
-    # คุณอาจจะต้องเก็บ mapping userId <-> sid ในระบบจริง
-    # ตัวอย่างนี้ไม่เก็บไว้ ต้องปรับตามระบบจริงของคุณ
-    pass
+    print("Client disconnected")
 
-# WebSocket: เข้าร่วมห้องแชท (chatId)
 @socketio.on('join_chat')
 def join_chat(data):
     chat_id = data.get('chatId')
@@ -74,7 +77,6 @@ def join_chat(data):
         join_room(chat_id)
         emit('status', {'msg': f'User {user_id} joined chat {chat_id}'}, room=chat_id)
 
-# WebSocket: ออกจากห้องแชท
 @socketio.on('leave_chat')
 def leave_chat(data):
     chat_id = data.get('chatId')
@@ -83,7 +85,6 @@ def leave_chat(data):
         leave_room(chat_id)
         emit('status', {'msg': f'User {user_id} left chat {chat_id}'}, room=chat_id)
 
-# WebSocket: ส่งข้อความในแชท
 @socketio.on('send_message')
 def send_message(data):
     chat_id = data.get('chatId')
@@ -94,31 +95,31 @@ def send_message(data):
         return
 
     now = datetime.datetime.utcnow()
-
-    # บันทึกข้อความใน MongoDB
     message = {
         "chatId": ObjectId(chat_id),
-        "senderId": sender_id,  # ใช้ userId ที่เป็น int หรือ string ตามที่เก็บจริง
+        "senderId": sender_id,
         "text": text,
         "sentAt": now,
         "readBy": [],
         "type": "text"
     }
-    result = messages_col.insert_one(message)
 
-    # อัปเดต lastMessage ใน chats
+    messages_col.insert_one(message)
+
     chats_col.update_one(
         {"_id": ObjectId(chat_id)},
-        {"$set": {"lastMessage": {
-            "text": text,
-            "sentAt": now,
-            "senderId": sender_id
-        }}}
+        {"$set": {
+            "lastMessage": {
+                "text": text,
+                "sentAt": now,
+                "senderId": sender_id
+            }
+        }}
     )
 
-    # ส่งข้อความไปยังผู้ที่อยู่ในห้อง chat_id ทุกคน (Realtime)
     emit('new_message', serialize_message(message), room=chat_id)
 
-
+# === Start Server ===
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=8080)
+    port = int(os.environ.get("PORT", 8080))  # Railway uses PORT env
+    socketio.run(app, host='0.0.0.0', port=port)
