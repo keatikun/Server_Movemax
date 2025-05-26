@@ -9,7 +9,7 @@ app.config['SECRET_KEY'] = 'your_secret_key'
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # เชื่อมต่อ MongoDB (แก้ URI ให้ตรงกับของคุณ)
-client = MongoClient("mongodb+srv://Keatikun:Ong100647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority")
+client = MongoClient("mongodb+srv://Keatikun:Ong10ๅ0647@movemax.szryalr.mongodb.net/?retryWrites=true&w=majority")
 db = client.mydatabase
 users_col = db.users
 chats_col = db.chats
