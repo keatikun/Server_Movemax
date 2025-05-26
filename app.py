@@ -65,7 +65,9 @@ def get_chat_messages():
     if not chat:
         return jsonify([])
 
-    return jsonify(chat)
+    # คืน messages list ใน chat (ถ้ามี) ไม่ใช่ chat object ทั้งหมด
+    return jsonify(chat.get('messages', []))
+
 
 # ---  chat list ของ userId ที่ส่งมา --- #
 @app.route('/chat-list')
