@@ -15,7 +15,7 @@ client = MongoClient(MONGO_URI)
 db = client["Movemax"]
 messages_col = db["messages"]
 users_col = db["users"]
-chats_col = db["chats"]  # สมมติว่ามี collection แชทเก็บห้อง
+chats_col = db["chats"]  # สำหรับเก็บข้อมูลห้องแชท (ถ้ามี)
 
 @app.route('/')
 def index():
@@ -38,13 +38,15 @@ def get_messages(user1, user2):
         m["_id"] = str(m["_id"])
     return jsonify({'messages': messages}), 200
 
+# เมื่อ client เข้าร่วมห้องแชท
 @socketio.on('join')
 def on_join(data):
-    room = data.get("room")
+    room = data.get("room")  # ชื่อห้อง เช่น user1_user2 (เรียงชื่อให้เหมือนกันเสมอ)
     username = data.get("username")
     join_room(room)
     emit('status', {'msg': f"{username} joined room {room}"}, room=room)
 
+# เมื่อ client ส่งข้อความเข้ามา
 @socketio.on('send_message')
 def on_send_message(data):
     room = data.get("room")
@@ -54,7 +56,10 @@ def on_send_message(data):
         "text": data.get("text"),
         "timestamp": datetime.utcnow().isoformat()
     }
+    # บันทึกข้อความลง MongoDB
     messages_col.insert_one(message)
+
+    # ส่งข้อความกลับไปยังห้อง (ทุกคนในห้องจะได้รับ)
     emit('receive_message', message, room=room)
 
 if __name__ == '__main__':
