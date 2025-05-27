@@ -1,10 +1,9 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit, join_room
 from pymongo import MongoClient
 from config import MONGO_URI, SECRET_KEY
-from datetime import datetime
-from flask_cors import CORS
 from datetime import datetime, timezone
+from flask_cors import CORS
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
@@ -14,9 +13,12 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 client = MongoClient(MONGO_URI)
 db = client["Movemax"]
-messages_col = db["messages"]
+
+# Collections
+admins_col = db["admins"]
 users_col = db["users"]
-chats_col = db["chats"]  # สำหรับเก็บข้อมูลห้องแชท (ถ้ามี)
+chats_col = db["chats"]
+messages_col = db["messages"]
 
 @app.route('/')
 def index():
@@ -26,6 +28,11 @@ def index():
 def get_all_users():
     users = list(users_col.find({}, {"_id": 0}))
     return jsonify(users), 200
+
+@app.route('/api/admins', methods=['GET'])
+def get_all_admins():
+    admins = list(admins_col.find({}, {"_id": 0}))
+    return jsonify(admins), 200
 
 @app.route('/chat/<user1>/<user2>', methods=['GET'])
 def get_messages(user1, user2):
@@ -39,27 +46,44 @@ def get_messages(user1, user2):
         m["_id"] = str(m["_id"])
     return jsonify({'messages': messages}), 200
 
-# เมื่อ client เข้าร่วมห้องแชท
+# สร้างชื่อห้องให้ standardized เช่น admin001_user001
+def generate_room_name(user1, user2):
+    return "_".join(sorted([user1, user2]))
+
 @socketio.on('join')
 def on_join(data):
-    room = data.get("room")  # ชื่อห้อง เช่น user1_user2 (เรียงชื่อให้เหมือนกันเสมอ)
-    username = data.get("username")
+    user1 = data.get("user1")
+    user2 = data.get("user2")
+    room = generate_room_name(user1, user2)
     join_room(room)
-    emit('status', {'msg': f"{username} joined room {room}"}, room=room)
+    emit('status', {'msg': f"{user1} joined room {room}"}, room=room)
 
-# เมื่อ client ส่งข้อความเข้ามา
 @socketio.on('send_message')
 def on_send_message(data):
-    room = data.get("room")
+    sender = data.get("from")
+    receiver = data.get("to")
+    room = generate_room_name(sender, receiver)
+
     message = {
-        "from": data.get("from"),
-        "to": data.get("to"),
+        "from": sender,
+        "to": receiver,
         "text": data.get("text"),
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
+
+    # insert message
     result = messages_col.insert_one(message)
     message["_id"] = str(result.inserted_id)
+
+    # check if chat room exists
+    if not chats_col.find_one({"room": room}):
+        chats_col.insert_one({
+            "room": room,
+            "participants": [sender, receiver],
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+
     emit('receive_message', message, room=room)
-    
+
 if __name__ == '__main__':
     socketio.run(app, debug=True, host='0.0.0.0', port=8080)
