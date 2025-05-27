@@ -56,11 +56,12 @@ def on_send_message(data):
         "text": data.get("text"),
         "timestamp": datetime.utcnow().isoformat()
     }
-    # บันทึกข้อความลง MongoDB
-    messages_col.insert_one(message)
+    # บันทึกข้อความลง MongoDB แล้วได้ ObjectId มา
+    result = messages_col.insert_one(message)
+    message["_id"] = str(result.inserted_id)  # แปลง ObjectId เป็น string
 
-    # ส่งข้อความกลับไปยังห้อง (ทุกคนในห้องจะได้รับ)
+    # ส่งข้อความกลับไปยังห้อง
     emit('receive_message', message, room=room)
-
+    
 if __name__ == '__main__':
     socketio.run(app, debug=True, host='0.0.0.0', port=8080)
