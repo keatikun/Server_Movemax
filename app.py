@@ -3,6 +3,7 @@ from flask_socketio import SocketIO, emit, join_room
 from pymongo import MongoClient
 from config import MONGO_URI, SECRET_KEY
 from datetime import datetime
+from flask import jsonify
 
 # Setup Flask
 app = Flask(__name__)
