@@ -4,6 +4,7 @@ from pymongo import MongoClient
 from config import MONGO_URI, SECRET_KEY
 from datetime import datetime
 from flask_cors import CORS
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
@@ -54,13 +55,10 @@ def on_send_message(data):
         "from": data.get("from"),
         "to": data.get("to"),
         "text": data.get("text"),
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
-    # บันทึกข้อความลง MongoDB แล้วได้ ObjectId มา
     result = messages_col.insert_one(message)
-    message["_id"] = str(result.inserted_id)  # แปลง ObjectId เป็น string
-
-    # ส่งข้อความกลับไปยังห้อง
+    message["_id"] = str(result.inserted_id)
     emit('receive_message', message, room=room)
     
 if __name__ == '__main__':
