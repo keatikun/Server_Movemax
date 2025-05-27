@@ -15,10 +15,17 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 client = MongoClient(MONGO_URI)
 db = client["Movemax"]
 messages_col = db["messages"]
+users_col = db["users"]  # เพิ่มบรรทัดนี้ถ้ายังไม่ได้ประกาศ
 
 @app.route('/')
 def index():
     return "✅ Chat server is running with WebSocket!"
+
+# ✅ API: ดึง users ทั้งหมด
+@app.route('/api/users', methods=['GET'])
+def get_all_users():
+    users = list(users_col.find({}, {"_id": 0}))  # ไม่แสดง _id
+    return jsonify(users), 200
 
 # WebSocket Event: เข้าร่วมห้องแชท 1:1
 @socketio.on('join')
