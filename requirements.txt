@@ -3,4 +3,4 @@ flask-socketio
 eventlet
 pymongo
 python-dotenv
-flask_cors
+flask-cors
