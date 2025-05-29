@@ -95,7 +95,7 @@ def on_send_message(data):
         "from": sender,
         "to": receiver,
         "text": data.get("text"),
-        "timestamp": datetime.now(timezone.utc).isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "read": False  # ✅ เพิ่มการบันทึกสถานะยังไม่อ่าน
     }
 
