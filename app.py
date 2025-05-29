@@ -31,8 +31,35 @@ def get_all_users():
 
 @app.route('/api/admins', methods=['GET'])
 def get_all_admins():
+    logged_in_user = request.args.get('me')
+    if not logged_in_user:
+        return jsonify({"error": "Missing 'me' parameter"}), 400  # ❌ ถ้าไม่ได้ส่ง me มา
+
     admins = list(admins_col.find({}, {"_id": 0}))
+
+    for admin in admins:
+        other_user = admin['username']
+
+        # ✅ หาข้อความล่าสุดระหว่าง logged_in_user กับแต่ละ admin
+        last_msg = messages_col.find_one(
+            {"$or": [
+                {"from": logged_in_user, "to": other_user},
+                {"from": other_user, "to": logged_in_user}
+            ]},
+            sort=[("timestamp", -1)]
+        )
+        admin["lastMessage"] = last_msg["text"] if last_msg else ""
+
+        # ✅ นับข้อความที่ยังไม่ได้อ่าน
+        unread_count = messages_col.count_documents({
+            "from": other_user,
+            "to": logged_in_user,
+            "read": False
+        })
+        admin["unreadCount"] = unread_count
+
     return jsonify(admins), 200
+
 
 @app.route('/chat/<user1>/<user2>', methods=['GET'])
 def get_messages(user1, user2):
@@ -69,6 +96,7 @@ def on_send_message(data):
         "to": receiver,
         "text": data.get("text"),
         "timestamp": datetime.now(timezone.utc).isoformat()
+        "read": False  # ✅ เพิ่มการบันทึกสถานะยังไม่อ่าน
     }
 
     # insert message
@@ -84,6 +112,15 @@ def on_send_message(data):
         })
 
     emit('receive_message', message, room=room)
+
+@app.route('/mark-as-read/<sender>/<receiver>', methods=['POST'])
+def mark_as_read(sender, receiver):
+    result = messages_col.update_many(
+        {"from": sender, "to": receiver, "read": False},
+        {"$set": {"read": True}}
+    )
+    return jsonify({"updated": result.modified_count}), 200
+
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, host='0.0.0.0', port=8080)
