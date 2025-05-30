@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from flask_cors import CORS
 import eventlet
 
+# Patch ก่อน import อื่นใดที่เกี่ยวข้องกับ network
 eventlet.monkey_patch()
 
 app = Flask(__name__)
@@ -58,6 +59,9 @@ def get_all_admins():
             "read": False
         })
         admin["unreadCount"] = unread_count
+
+        typing_user = admins_col.find_one({"username": other_user}, {"typing": 1})
+        admin["typing"] = typing_user.get("typing", False) if typing_user else False
 
     return jsonify(admins), 200
 
@@ -157,4 +161,4 @@ def handle_typing(data):
     emit("typing_status", {"from": username, "typing": is_typing}, room=room)
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=8080)
+    socketio.run(app, host='0.0.0.0', port=8080, debug=True)
