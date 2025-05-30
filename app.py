@@ -46,7 +46,6 @@ def get_messages(user1, user2):
         m["_id"] = str(m["_id"])
     return jsonify({'messages': messages}), 200
 
-# สร้างชื่อห้องให้ standardized เช่น admin001_user001
 def generate_room_name(user1, user2):
     return "_".join(sorted([user1, user2]))
 
@@ -58,6 +57,12 @@ def on_join(data):
     join_room(room)
     emit('status', {'msg': f"{user1} joined room {room}"}, room=room)
 
+# ✅ เพิ่มห้องของแต่ละ user เพื่อใช้ emit ไปยัง user โดยตรง
+@socketio.on('join_user_room')
+def join_user_room(data):
+    user_id = data.get('userId')
+    if user_id:
+        join_room(user_id)
 
 @app.route('/chat/mark_read/<user1>/<user2>', methods=['POST'])
 def mark_as_read(user1, user2):
@@ -65,6 +70,10 @@ def mark_as_read(user1, user2):
         {"from": user2, "to": user1, "is_read": False},
         {"$set": {"is_read": True}}
     )
+
+    # ✅ แจ้ง client ให้ refresh unread count
+    socketio.emit('update_unread', to=user1)
+
     return jsonify({"marked_as_read": result.modified_count}), 200
 
 @app.route('/chat/unread_count/<user_id>', methods=['GET'])
@@ -75,22 +84,6 @@ def get_unread_count(user_id):
     ]
     result = list(messages_col.aggregate(pipeline))
     return jsonify({"unread_counts": result}), 200
-
-
-@socketio.on('typing')
-def on_typing(data):
-    sender = data.get("from")
-    receiver = data.get("to")
-    room = generate_room_name(sender, receiver)
-    emit('typing', {"from": sender}, room=room)
-
-@socketio.on('stop_typing')
-def on_stop_typing(data):
-    sender = data.get("from")
-    receiver = data.get("to")
-    room = generate_room_name(sender, receiver)
-    emit('stop_typing', {"from": sender}, room=room)
-
 
 @app.route('/chat/last_messages/<user_id>', methods=['GET'])
 def get_last_messages(user_id):
@@ -116,7 +109,19 @@ def get_last_messages(user_id):
         msg["_id"] = str(msg["_id"])
     return jsonify({"last_messages": result}), 200
 
+@socketio.on('typing')
+def on_typing(data):
+    sender = data.get("from")
+    receiver = data.get("to")
+    room = generate_room_name(sender, receiver)
+    emit('typing', {"from": sender}, room=room)
 
+@socketio.on('stop_typing')
+def on_stop_typing(data):
+    sender = data.get("from")
+    receiver = data.get("to")
+    room = generate_room_name(sender, receiver)
+    emit('stop_typing', {"from": sender}, room=room)
 
 @socketio.on('send_message')
 def on_send_message(data):
@@ -129,13 +134,12 @@ def on_send_message(data):
         "to": receiver,
         "text": data.get("text"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "is_read": False  
+        "is_read": False
     }
-    # insert message
+
     result = messages_col.insert_one(message)
     message["_id"] = str(result.inserted_id)
 
-    # check if chat room exists
     if not chats_col.find_one({"room": room}):
         chats_col.insert_one({
             "room": room,
@@ -143,7 +147,11 @@ def on_send_message(data):
             "created_at": datetime.now(timezone.utc).isoformat()
         })
 
+    # ✅ ส่ง message ไปยังห้องแชท
     emit('receive_message', message, room=room)
+
+    # ✅ ส่ง event ไปยังผู้รับ เพื่อ refresh chat list
+    socketio.emit('new_message', message, to=receiver)
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, host='0.0.0.0', port=8080)
