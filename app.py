@@ -4,12 +4,15 @@ from pymongo import MongoClient
 from config import MONGO_URI, SECRET_KEY
 from datetime import datetime, timezone
 from flask_cors import CORS
+import eventlet
+
+eventlet.monkey_patch()
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 CORS(app)
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 client = MongoClient(MONGO_URI)
 db = client["Movemax"]
@@ -154,4 +157,4 @@ def handle_typing(data):
     emit("typing_status", {"from": username, "typing": is_typing}, room=room)
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, host='0.0.0.0', port=8080)
+    socketio.run(app, host='0.0.0.0', port=8080)
