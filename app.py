@@ -57,7 +57,7 @@ def on_join(data):
     join_room(room)
     emit('status', {'msg': f"{user1} joined room {room}"}, room=room)
 
-# ✅ เพิ่มห้องของแต่ละ user เพื่อใช้ emit ไปยัง user โดยตรง
+# ✔️ เพิ่มห้องของแต่ละ user เพื่อใช้ emit ไปยัง user โดยตรง
 @socketio.on('join_user_room')
 def join_user_room(data):
     user_id = data.get('userId')
@@ -71,7 +71,7 @@ def mark_as_read(user1, user2):
         {"$set": {"is_read": True}}
     )
 
-    # ✅ แจ้ง client ให้ refresh unread count
+    # ✔️ แจ้ง client ให้ refresh unread count
     socketio.emit('update_unread', to=user1)
 
     return jsonify({"marked_as_read": result.modified_count}), 200
@@ -147,10 +147,10 @@ def on_send_message(data):
             "created_at": datetime.now(timezone.utc).isoformat()
         })
 
-    # ✅ ส่ง message ไปยังห้องแชท
+    # ✔️ ส่ง message ไปยังห้องแชท
     emit('receive_message', message, room=room)
 
-    # ✅ ส่ง event ไปยังผู้รับ เพื่อ refresh chat list
+    # ✔️ ส่ง event ไปยังผู้รับ เพื่อ refresh chat list
     socketio.emit('new_message', message, to=receiver)
 
 if __name__ == '__main__':
