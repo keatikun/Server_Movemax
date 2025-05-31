@@ -20,6 +20,9 @@ users_col = db["users"]
 chats_col = db["chats"]
 messages_col = db["messages"]
 
+# เก็บ mapping socket_id -> user_id สำหรับติดตามสถานะออนไลน์
+connected_users = {}
+
 @app.route('/')
 def index():
     return "Chat server is running!"
@@ -63,6 +66,25 @@ def join_user_room(data):
     user_id = data.get('userId')
     if user_id:
         join_room(user_id)
+        # บันทึก socket_id -> user_id
+        connected_users[request.sid] = user_id
+        # อัปเดตสถานะออนไลน์ในฐานข้อมูล
+        users_col.update_one({"username": user_id}, {"$set": {"is_online": True}})
+        admins_col.update_one({"username": user_id}, {"$set": {"is_online": True}})
+        # แจ้ง client ทั้งหมดว่ามี user นี้ออนไลน์
+        socketio.emit('user_status_changed', {'userId': user_id, 'is_online': True})
+
+@socketio.on('disconnect')
+def on_disconnect():
+    sid = request.sid
+    user_id = connected_users.get(sid)
+    if user_id:
+        # อัปเดตสถานะ offline
+        users_col.update_one({"username": user_id}, {"$set": {"is_online": False}})
+        admins_col.update_one({"username": user_id}, {"$set": {"is_online": False}})
+        connected_users.pop(sid, None)
+        # แจ้ง client ว่ามี user ออฟไลน์
+        socketio.emit('user_status_changed', {'userId': user_id, 'is_online': False})
 
 @app.route('/chat/mark_read/<user1>/<user2>', methods=['POST'])
 def mark_as_read(user1, user2):
@@ -155,4 +177,3 @@ def on_send_message(data):
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, host='0.0.0.0', port=8080)
-    
