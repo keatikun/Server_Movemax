@@ -87,27 +87,37 @@ def get_unread_count(user_id):
 
 @app.route('/chat/last_messages/<user_id>', methods=['GET'])
 def get_last_messages(user_id):
-    pipeline = [
-        {"$match": {"$or": [{"from": user_id}, {"to": user_id}]}},
-        {"$sort": {"timestamp": -1}},
-        {"$group": {
-            "_id": {
-                "room": {
-                    "$cond": {
-                        "if": {"$gt": ["$from", "$to"]},
-                        "then": {"$concat": ["$from", "_", "$to"]},
-                        "else": {"$concat": ["$to", "_", "$from"]}
-                    }
-                }
+    # 1. ดึง admin ทั้งหมด
+    admins = list(admins_col.find({}, {"_id": 0, "username": 1}))
+    usernames = [a["username"] for a in admins]
+    last_messages = []
+    for username in usernames:
+        if username == user_id:
+            continue  # ข้ามตัวเอง
+        # 2. หา message ล่าสุดระหว่าง user_id กับแอดมินคนนี้
+        last = messages_col.find_one(
+            {
+                "$or": [
+                    {"from": user_id, "to": username},
+                    {"from": username, "to": user_id}
+                ]
             },
-            "last_message": {"$first": "$$ROOT"}
-        }},
-        {"$replaceRoot": {"newRoot": "$last_message"}}
-    ]
-    result = list(messages_col.aggregate(pipeline))
-    for msg in result:
-        msg["_id"] = str(msg["_id"])
-    return jsonify({"last_messages": result}), 200
+            sort=[("timestamp", -1)]
+        )
+        if last:
+            last["_id"] = str(last["_id"])
+            last_messages.append(last)
+        else:
+            # ถ้ายังไม่มีข้อความเลย ก็ใส่ข้อมูลเปล่าไว้ให้แสดงชื่อได้
+            last_messages.append({
+                "from": user_id,
+                "to": username,
+                "text": "",
+                "timestamp": None,
+                "is_read": True  # ถือว่าไม่มีอะไรค้างอ่าน
+            })
+
+    return jsonify({"last_messages": last_messages}), 200
 
 @socketio.on('typing')
 def on_typing(data):
