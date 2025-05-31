@@ -1,9 +1,9 @@
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit, join_room
 from pymongo import MongoClient
-from config import MONGO_URI, SECRET_KEY
 from datetime import datetime, timezone
 from flask_cors import CORS
+from config import MONGO_URI, SECRET_KEY  # import จาก config.py
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
@@ -47,6 +47,7 @@ def get_messages(user1, user2):
     return jsonify({'messages': messages}), 200
 
 def generate_room_name(user1, user2):
+    # สร้างชื่อห้องแบบไม่สนใจลำดับ
     return "_".join(sorted([user1, user2]))
 
 @socketio.on('join')
@@ -57,7 +58,6 @@ def on_join(data):
     join_room(room)
     emit('status', {'msg': f"{user1} joined room {room}"}, room=room)
 
-# ✔️ เพิ่มห้องของแต่ละ user เพื่อใช้ emit ไปยัง user โดยตรง
 @socketio.on('join_user_room')
 def join_user_room(data):
     user_id = data.get('userId')
@@ -70,10 +70,7 @@ def mark_as_read(user1, user2):
         {"from": user2, "to": user1, "is_read": False},
         {"$set": {"is_read": True}}
     )
-
-    # ✔️ แจ้ง client ให้ refresh unread count
     socketio.emit('update_unread', to=user1)
-
     return jsonify({"marked_as_read": result.modified_count}), 200
 
 @app.route('/chat/unread_count/<user_id>', methods=['GET'])
@@ -87,14 +84,12 @@ def get_unread_count(user_id):
 
 @app.route('/chat/last_messages/<user_id>', methods=['GET'])
 def get_last_messages(user_id):
-    # 1. ดึง admin ทั้งหมด
     admins = list(admins_col.find({}, {"_id": 0, "username": 1}))
     usernames = [a["username"] for a in admins]
     last_messages = []
     for username in usernames:
         if username == user_id:
-            continue  # ข้ามตัวเอง
-        # 2. หา message ล่าสุดระหว่าง user_id กับแอดมินคนนี้
+            continue
         last = messages_col.find_one(
             {
                 "$or": [
@@ -108,15 +103,13 @@ def get_last_messages(user_id):
             last["_id"] = str(last["_id"])
             last_messages.append(last)
         else:
-            # ถ้ายังไม่มีข้อความเลย ก็ใส่ข้อมูลเปล่าไว้ให้แสดงชื่อได้
             last_messages.append({
                 "from": user_id,
                 "to": username,
                 "text": "",
                 "timestamp": None,
-                "is_read": True  # ถือว่าไม่มีอะไรค้างอ่าน
+                "is_read": True
             })
-
     return jsonify({"last_messages": last_messages}), 200
 
 @socketio.on('typing')
@@ -157,11 +150,9 @@ def on_send_message(data):
             "created_at": datetime.now(timezone.utc).isoformat()
         })
 
-    # ✔️ ส่ง message ไปยังห้องแชท
     emit('receive_message', message, room=room)
-
-    # ✔️ ส่ง event ไปยังผู้รับ เพื่อ refresh chat list
     socketio.emit('new_message', message, to=receiver)
 
 if __name__ == '__main__':
     socketio.run(app, debug=True, host='0.0.0.0', port=8080)
+    
