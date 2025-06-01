@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from flask_cors import CORS
 from config import MONGO_URI, SECRET_KEY
 import os
+from bson.objectid import ObjectId
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
@@ -42,6 +43,25 @@ def get_users():
 def get_admins():
     admins = list(admins_col.find({}, {"_id": 0, "username": 1, "name": 1, "is_online": 1}))
     return jsonify(admins), 200
+
+@app.route('/chat/<user1>/<user2>', methods=['GET'])
+def get_chat_history(user1, user2):
+    # ดึงข้อความระหว่าง user1 กับ user2 จาก collection messages
+    messages = list(messages_col.find(
+        {"$or": [
+            {"from": user1, "to": user2},
+            {"from": user2, "to": user1}
+        ]}
+    ).sort("timestamp", 1))  # เรียงตามเวลาขึ้น
+
+    # แปลง ObjectId เป็น string และแปลง datetime เป็น string ถ้าจำเป็น
+    for msg in messages:
+        msg["_id"] = str(msg["_id"])
+        # กรณี timestamp เป็น datetime ให้แปลงเป็น isoformat
+        if isinstance(msg.get("timestamp"), datetime):
+            msg["timestamp"] = msg["timestamp"].isoformat()
+
+    return jsonify({"messages": messages}), 200
 
 
 @socketio.on('join_user_room')
