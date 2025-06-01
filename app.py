@@ -1,5 +1,3 @@
-# production_server.py
-
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit, join_room
 from pymongo import MongoClient
@@ -13,7 +11,6 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 CORS(app)
 
-# ใช้ Redis เป็น message queue ถ้ามี ไม่งั้นใช้ in-memory
 try:
     import redis
     socketio = SocketIO(app, cors_allowed_origins="*", message_queue='redis://localhost:6379')
@@ -34,24 +31,48 @@ connected_users = {}
 def index():
     return "Production Chat Server Running!"
 
+def get_unread_counts_for_user(user_id):
+    pipeline = [
+        {"$match": {"to": user_id, "is_read": False}},
+        {"$group": {"_id": "$from", "count": {"$sum": 1}}}
+    ]
+    result = list(messages_col.aggregate(pipeline))
+    return {entry["_id"]: entry["count"] for entry in result}
+
 @app.route('/api/users', methods=['GET'])
 def get_users():
+    current_user = request.args.get("user_id")
     users = list(users_col.find({}, {"_id": 0, "username": 1, "name": 1, "is_online": 1}))
+    if current_user:
+        unread_map = get_unread_counts_for_user(current_user)
+        for user in users:
+            user['unread_count'] = unread_map.get(user["username"], 0)
+    else:
+        for user in users:
+            user['unread_count'] = 0
     return jsonify(users), 200
 
 @app.route('/api/admins', methods=['GET'])
 def get_admins():
+    current_user = request.args.get("user_id")
     admins = list(admins_col.find({}, {"_id": 0, "username": 1, "name": 1, "is_online": 1}))
+    if current_user:
+        unread_map = get_unread_counts_for_user(current_user)
+        for admin in admins:
+            admin['unread_count'] = unread_map.get(admin["username"], 0)
+    else:
+        for admin in admins:
+            admin['unread_count'] = 0
     return jsonify(admins), 200
 
 @app.route('/chat/<user1>/<user2>', methods=['GET'])
 def get_chat_history(user1, user2):
-    messages = list(messages_col.find(
-        {"$or": [
+    messages = list(messages_col.find({
+        "$or": [
             {"from": user1, "to": user2},
             {"from": user2, "to": user1}
-        ]}
-    ).sort("timestamp", 1))
+        ]
+    }).sort("timestamp", 1))
 
     for msg in messages:
         msg["_id"] = str(msg["_id"])
@@ -83,7 +104,6 @@ def on_disconnect():
                 admins_col.update_one({"username": user_id}, {"$set": {"is_online": False}})
                 socketio.emit('user_status_changed', {'userId': user_id, 'is_online': False})
             break
-    # Cleanup from all sets
     for s in connected_users.values():
         s.discard(sid)
 
@@ -198,6 +218,5 @@ if __name__ == '__main__':
     import eventlet.wsgi
     logging.getLogger('socketio').setLevel(logging.ERROR)
     logging.getLogger('engineio').setLevel(logging.ERROR)
-
     print("Starting production server on http://0.0.0.0:8080")
     socketio.run(app, host='0.0.0.0', port=8080)
