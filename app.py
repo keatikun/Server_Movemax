@@ -6,16 +6,16 @@ from pymongo import MongoClient
 from datetime import datetime, timezone
 from flask_cors import CORS
 from config import MONGO_URI, SECRET_KEY
-import os
 from bson.objectid import ObjectId
+import logging
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 CORS(app)
 
-# Use Redis if installed, else fallback to in-memory
+# ใช้ Redis เป็น message queue ถ้ามี ไม่งั้นใช้ in-memory
 try:
-    import redis  # ensure redis package is installed
+    import redis
     socketio = SocketIO(app, cors_allowed_origins="*", message_queue='redis://localhost:6379')
 except ImportError:
     socketio = SocketIO(app, cors_allowed_origins="*")
@@ -46,32 +46,26 @@ def get_admins():
 
 @app.route('/chat/<user1>/<user2>', methods=['GET'])
 def get_chat_history(user1, user2):
-    # ดึงข้อความระหว่าง user1 กับ user2 จาก collection messages
     messages = list(messages_col.find(
         {"$or": [
             {"from": user1, "to": user2},
             {"from": user2, "to": user1}
         ]}
-    ).sort("timestamp", 1))  # เรียงตามเวลาขึ้น
+    ).sort("timestamp", 1))
 
-    # แปลง ObjectId เป็น string และแปลง datetime เป็น string ถ้าจำเป็น
     for msg in messages:
         msg["_id"] = str(msg["_id"])
-        # กรณี timestamp เป็น datetime ให้แปลงเป็น isoformat
         if isinstance(msg.get("timestamp"), datetime):
             msg["timestamp"] = msg["timestamp"].isoformat()
 
     return jsonify({"messages": messages}), 200
-
 
 @socketio.on('join_user_room')
 def join_user_room(data):
     user_id = data.get('userId')
     if user_id:
         join_room(user_id)
-        if user_id not in connected_users:
-            connected_users[user_id] = set()
-        connected_users[user_id].add(request.sid)
+        connected_users.setdefault(user_id, set()).add(request.sid)
         users_col.update_one({"username": user_id}, {"$set": {"is_online": True}})
         admins_col.update_one({"username": user_id}, {"$set": {"is_online": True}})
         socketio.emit('user_status_changed', {'userId': user_id, 'is_online': True})
@@ -89,6 +83,7 @@ def on_disconnect():
                 admins_col.update_one({"username": user_id}, {"$set": {"is_online": False}})
                 socketio.emit('user_status_changed', {'userId': user_id, 'is_online': False})
             break
+    # Cleanup from all sets
     for s in connected_users.values():
         s.discard(sid)
 
@@ -154,7 +149,6 @@ def get_unread_count(user_id):
 
 @app.route('/chat/last_messages/<user_id>', methods=['GET'])
 def get_last_messages(user_id):
-    participants = set()
     messages = list(messages_col.find({"$or": [{"from": user_id}, {"to": user_id}]}).sort("timestamp", -1))
     last_msgs = {}
     for msg in messages:
@@ -166,13 +160,19 @@ def get_last_messages(user_id):
 
 @app.route('/chat/pin_message/<message_id>', methods=['POST'])
 def pin_message(message_id):
-    messages_col.update_one({"_id": message_id}, {"$set": {"is_pinned": True}})
-    return jsonify({"status": "pinned"}), 200
+    try:
+        messages_col.update_one({"_id": ObjectId(message_id)}, {"$set": {"is_pinned": True}})
+        return jsonify({"status": "pinned"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 @app.route('/chat/unpin_message/<message_id>', methods=['POST'])
 def unpin_message(message_id):
-    messages_col.update_one({"_id": message_id}, {"$set": {"is_pinned": False}})
-    return jsonify({"status": "unpinned"}), 200
+    try:
+        messages_col.update_one({"_id": ObjectId(message_id)}, {"$set": {"is_pinned": False}})
+        return jsonify({"status": "unpinned"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 @app.route('/chat/delete_chat/<user1>/<user2>', methods=['DELETE'])
 def delete_chat(user1, user2):
@@ -196,7 +196,6 @@ def set_notifications():
 if __name__ == '__main__':
     import eventlet
     import eventlet.wsgi
-    import logging
     logging.getLogger('socketio').setLevel(logging.ERROR)
     logging.getLogger('engineio').setLevel(logging.ERROR)
 
