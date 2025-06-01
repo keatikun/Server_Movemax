@@ -35,13 +35,14 @@ def index():
 
 @app.route('/api/users', methods=['GET'])
 def get_users():
-    users = list(users_col.find({}, {"_id": 0}))
-    return jsonify(users)
+    users = list(users_col.find({}, {"_id": 0, "username": 1, "name": 1, "is_online": 1}))
+    return jsonify(users), 200
 
 @app.route('/api/admins', methods=['GET'])
 def get_admins():
-    admins = list(admins_col.find({}, {"_id": 0}))
-    return jsonify(admins)
+    admins = list(admins_col.find({}, {"_id": 0, "username": 1, "name": 1, "is_online": 1}))
+    return jsonify(admins), 200
+
 
 @socketio.on('join_user_room')
 def join_user_room(data):
