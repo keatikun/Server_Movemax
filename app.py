@@ -65,6 +65,20 @@ def get_admins():
             admin['unread_count'] = 0
     return jsonify(admins), 200
 
+# เพิ่ม API นี้ เพื่อแก้ปัญหา 404
+@app.route('/api/admins_with_unread', methods=['GET'])
+def get_admins_with_unread():
+    current_user = request.args.get("user_id")
+    admins = list(admins_col.find({}, {"_id": 0, "username": 1, "name": 1, "is_online": 1}))
+    if current_user:
+        unread_map = get_unread_counts_for_user(current_user)
+        for admin in admins:
+            admin['unread_count'] = unread_map.get(admin["username"], 0)
+    else:
+        for admin in admins:
+            admin['unread_count'] = 0
+    return jsonify(admins), 200
+
 @app.route('/chat/<user1>/<user2>', methods=['GET'])
 def get_chat_history(user1, user2):
     messages = list(messages_col.find({
