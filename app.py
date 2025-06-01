@@ -33,6 +33,16 @@ connected_users = {}
 def index():
     return "Production Chat Server Running!"
 
+@app.route('/api/users', methods=['GET'])
+def get_users():
+    users = list(users_col.find({}, {"_id": 0}))
+    return jsonify(users)
+
+@app.route('/api/admins', methods=['GET'])
+def get_admins():
+    admins = list(admins_col.find({}, {"_id": 0}))
+    return jsonify(admins)
+
 @socketio.on('join_user_room')
 def join_user_room(data):
     user_id = data.get('userId')
