@@ -138,6 +138,7 @@ def on_send_message(data):
 
     emit('receive_message', message, room=room)
     socketio.emit('new_message', message, to=receiver)
+    socketio.emit('update_unread', to=receiver)
 
 @socketio.on('typing')
 def on_typing(data):
@@ -156,6 +157,7 @@ def mark_as_read(user1, user2):
         {"$set": {"is_read": True}}
     )
     socketio.emit('update_unread', to=user1)
+    socketio.emit('update_unread', to=user2)
     return jsonify({"marked_as_read": result.modified_count}), 200
 
 @app.route('/chat/unread_count/<user_id>', methods=['GET'])
