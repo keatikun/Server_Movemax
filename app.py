@@ -1,17 +1,23 @@
 # production_server.py
+
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit, join_room
 from pymongo import MongoClient
 from datetime import datetime, timezone
 from flask_cors import CORS
-from config import MONGO_URI, SECRET_KEY  # your own config file
+from config import MONGO_URI, SECRET_KEY
+import os
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 CORS(app)
 
-# Use Redis as message queue for scaling across multiple workers
-socketio = SocketIO(app, cors_allowed_origins="*", message_queue='redis://localhost:6379')
+# Use Redis if installed, else fallback to in-memory
+try:
+    import redis  # ensure redis package is installed
+    socketio = SocketIO(app, cors_allowed_origins="*", message_queue='redis://localhost:6379')
+except ImportError:
+    socketio = SocketIO(app, cors_allowed_origins="*")
 
 client = MongoClient(MONGO_URI)
 db = client["Movemax"]
@@ -21,7 +27,7 @@ users_col = db["users"]
 chats_col = db["chats"]
 messages_col = db["messages"]
 
-connected_users = {}  # in-memory connection tracking
+connected_users = {}
 
 @app.route('/')
 def index():
@@ -70,7 +76,9 @@ def on_send_message(data):
         "to": receiver,
         "text": data.get("text"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "is_read": False
+        "is_read": False,
+        "is_pinned": False,
+        "notifications_enabled": True
     }
     result = messages_col.insert_one(message)
     message["_id"] = str(result.inserted_id)
@@ -94,6 +102,65 @@ def on_typing(data):
 def on_stop_typing(data):
     room = "_".join(sorted([data['from'], data['to']]))
     emit('stop_typing', {'from': data['from']}, room=room)
+
+@app.route('/chat/mark_read/<user1>/<user2>', methods=['POST'])
+def mark_as_read(user1, user2):
+    result = messages_col.update_many(
+        {"from": user2, "to": user1, "is_read": False},
+        {"$set": {"is_read": True}}
+    )
+    socketio.emit('update_unread', to=user1)
+    return jsonify({"marked_as_read": result.modified_count}), 200
+
+@app.route('/chat/unread_count/<user_id>', methods=['GET'])
+def get_unread_count(user_id):
+    pipeline = [
+        {"$match": {"to": user_id, "is_read": False}},
+        {"$group": {"_id": "$from", "count": {"$sum": 1}}}
+    ]
+    result = list(messages_col.aggregate(pipeline))
+    return jsonify({"unread_counts": result}), 200
+
+@app.route('/chat/last_messages/<user_id>', methods=['GET'])
+def get_last_messages(user_id):
+    participants = set()
+    messages = list(messages_col.find({"$or": [{"from": user_id}, {"to": user_id}]}).sort("timestamp", -1))
+    last_msgs = {}
+    for msg in messages:
+        other = msg['to'] if msg['from'] == user_id else msg['from']
+        if other not in last_msgs:
+            msg['_id'] = str(msg['_id'])
+            last_msgs[other] = msg
+    return jsonify({"last_messages": list(last_msgs.values())}), 200
+
+@app.route('/chat/pin_message/<message_id>', methods=['POST'])
+def pin_message(message_id):
+    messages_col.update_one({"_id": message_id}, {"$set": {"is_pinned": True}})
+    return jsonify({"status": "pinned"}), 200
+
+@app.route('/chat/unpin_message/<message_id>', methods=['POST'])
+def unpin_message(message_id):
+    messages_col.update_one({"_id": message_id}, {"$set": {"is_pinned": False}})
+    return jsonify({"status": "unpinned"}), 200
+
+@app.route('/chat/delete_chat/<user1>/<user2>', methods=['DELETE'])
+def delete_chat(user1, user2):
+    result = messages_col.delete_many({
+        "$or": [
+            {"from": user1, "to": user2},
+            {"from": user2, "to": user1}
+        ]
+    })
+    return jsonify({"deleted": result.deleted_count}), 200
+
+@app.route('/chat/set_notifications', methods=['POST'])
+def set_notifications():
+    data = request.json
+    sender = data['from']
+    receiver = data['to']
+    enabled = data['enabled']
+    messages_col.update_many({"from": sender, "to": receiver}, {"$set": {"notifications_enabled": enabled}})
+    return jsonify({"status": "updated"}), 200
 
 if __name__ == '__main__':
     import eventlet
