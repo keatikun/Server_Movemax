@@ -42,7 +42,7 @@ def get_unread_counts_for_user(user_id):
 @app.route('/api/users', methods=['GET'])
 def get_users():
     current_user = request.args.get("user_id")
-    users = list(users_col.find({}, {"_id": 0, "username": 1, "name": 1, "is_online": 1}))
+    users = list(users_col.find({}, {"_id": 0, "username": 1, "name": 1, "is_online": 1, "picture": 1}))
     if current_user:
         unread_map = get_unread_counts_for_user(current_user)
         for user in users:
@@ -55,7 +55,7 @@ def get_users():
 @app.route('/api/admins', methods=['GET'])
 def get_admins():
     current_user = request.args.get("user_id")
-    admins = list(admins_col.find({}, {"_id": 0, "username": 1, "name": 1, "is_online": 1}))
+    admins = list(admins_col.find({}, {"_id": 0, "username": 1, "name": 1, "is_online": 1, "picture": 1}))
     if current_user:
         unread_map = get_unread_counts_for_user(current_user)
         for admin in admins:
