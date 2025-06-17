@@ -141,6 +141,38 @@ def on_stop_typing(data):
     room_id = data.get("room_id")
     emit('stop_typing', {'user_id': data.get('user_id')}, room=room_id)
 
+@app.route('/chat_room')
+def get_or_create_room():
+    user1 = request.args.get("user1")  # ObjectId string
+    user2 = request.args.get("user2")
+    role1 = request.args.get("role1")  # admin หรือ user
+    role2 = request.args.get("role2")
+    # หา room ที่มี user1 กับ user2 ทั้งคู่
+    room = rooms_col.find_one({
+        "members": {
+            "$all": [
+                {"id": ObjectId(user1), "type": role1},
+                {"id": ObjectId(user2), "type": role2}
+            ]
+        }
+    })
+
+    if room:
+        return jsonify({"room_id": str(room["_id"])})
+
+    # สร้างใหม่ถ้าไม่พบ
+    result = rooms_col.insert_one({
+        "type": "private",
+        "members": [
+            {"id": ObjectId(user1), "type": role1},
+            {"id": ObjectId(user2), "type": role2}
+        ],
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc)
+    })
+    return jsonify({"room_id": str(result.inserted_id)})
+
+
 @app.route('/chat/<room_id>', methods=['GET'])
 def get_chat_history(room_id):
     messages = list(messages_col.find({"room_id": ObjectId(room_id)}).sort("timestamp", 1))
