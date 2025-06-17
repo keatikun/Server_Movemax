@@ -29,6 +29,59 @@ connected_users = {}
 def index():
     return "Chat Server Running!"
 
+@app.route('/api/users', methods=['GET'])
+def get_users():
+    users = list(users_col.find({}, {"password": 0}))
+    for u in users:
+        u["_id"] = str(u["_id"])
+    return jsonify(users), 200
+
+@app.route('/api/admins', methods=['GET'])
+def get_admins():
+    admins = list(admins_col.find({}, {"password": 0}))
+    for a in admins:
+        a["_id"] = str(a["_id"])
+    return jsonify(admins), 200
+
+@app.route('/api/unread_counts/<user_id>', methods=['GET'])
+def get_unread_counts(user_id):
+    try:
+        user_obj_id = ObjectId(user_id)
+    except:
+        return jsonify({"error": "Invalid user_id"}), 400
+
+    reads = list(reads_col.find({"user_id": user_obj_id}))
+    unread_counts = {}
+
+    for read in reads:
+        room_id = read["room_id"]
+        last_read = read.get("last_read_timestamp", datetime.min.replace(tzinfo=timezone.utc))
+
+        count = messages_col.count_documents({
+            "room_id": room_id,
+            "timestamp": {"$gt": last_read}
+        })
+        unread_counts[str(room_id)] = count
+
+    return jsonify(unread_counts), 200
+
+@app.route('/api/user_status/<user_id>', methods=['GET'])
+def get_user_status(user_id):
+    try:
+        user_obj_id = ObjectId(user_id)
+    except:
+        return jsonify({"error": "Invalid user_id"}), 400
+
+    status = user_status_col.find_one({"user_id": user_obj_id})
+    if not status:
+        return jsonify({"user_id": user_id, "is_online": False}), 200
+
+    return jsonify({
+        "user_id": user_id,
+        "is_online": status.get("is_online", False),
+        "last_active": status.get("last_active").isoformat() if status.get("last_active") else None
+    }), 200
+
 @socketio.on('join_user_room')
 def join_user_room(data):
     user_id = data.get('userId')
@@ -100,8 +153,8 @@ def get_chat_history(room_id):
 def mark_as_read():
     data = request.json
     reads_col.update_one(
-        {"user_id": ObjectId(data["user_id"]), "room_id": ObjectId(data["room_id"])}
-        , {"$set": {"last_read_timestamp": datetime.now(timezone.utc)}}, upsert=True
+        {"user_id": ObjectId(data["user_id"]), "room_id": ObjectId(data["room_id"])},
+        {"$set": {"last_read_timestamp": datetime.now(timezone.utc)}}, upsert=True
     )
     return jsonify({"status": "read"}), 200
 
