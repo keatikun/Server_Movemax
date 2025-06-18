@@ -143,7 +143,7 @@ def on_typing(data):
 def on_stop_typing(data):
     room_id = data.get("room_id")
     emit('stop_typing', {'user_id': data.get('user_id')}, room=room_id)
-
+    
 @app.route('/chat_room')
 def get_or_create_room():
     try:
@@ -151,21 +151,20 @@ def get_or_create_room():
         user2 = ObjectId(request.args.get("user2"))
         role1 = request.args.get("role1")
         role2 = request.args.get("role2")
-    except:
+    except Exception:
         return jsonify({"error": "Invalid parameters"}), 400
-
+    # หา room ที่มีสมาชิก 2 คนตามเงื่อนไข
     room = rooms_col.find_one({
-        "members": {
-            "$all": [
-                {"id": user1, "type": role1},
-                {"id": user2, "type": role2}
-            ]
-        }
+        "$and": [
+            {"members": {"$elemMatch": {"id": user1, "type": role1}}},
+            {"members": {"$elemMatch": {"id": user2, "type": role2}}}
+        ],
+        "type": "private"  # ถ้าต้องการเจาะจงเฉพาะ private rooms
     })
-
     if room:
         return jsonify({"room_id": str(room["_id"])})
 
+    # สร้างห้องใหม่ถ้าไม่เจอ
     result = rooms_col.insert_one({
         "type": "private",
         "members": [
@@ -176,6 +175,7 @@ def get_or_create_room():
         "updated_at": datetime.now(timezone.utc)
     })
     return jsonify({"room_id": str(result.inserted_id)})
+
 
 @app.route('/chat/<room_id>', methods=['GET'])
 def get_chat_history(room_id):
