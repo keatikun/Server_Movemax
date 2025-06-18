@@ -149,39 +149,41 @@ def on_stop_typing(data):
 @app.route('/chat_room')
 def get_or_create_room():
     try:
-        user1 = ObjectId(request.args.get("user1"))
-        user2 = ObjectId(request.args.get("user2"))
+        user1 = request.args.get("user1")
+        user2 = request.args.get("user2")
         role1 = request.args.get("role1")
         role2 = request.args.get("role2")
-    except Exception as e:
-        return jsonify({"error": "Invalid parameters"}), 400
+        if not all([user1, user2, role1, role2]):
+            raise ValueError("Missing parameters")
+        
+        # สร้าง room_key แบบเรียง id+role เสมอ
+        pair = sorted([
+            f"{user1}_{role1}",
+            f"{user2}_{role2}"
+        ])
+        room_key = "|".join(pair)
 
-    members = [
-        {"id": user1, "type": role1},
-        {"id": user2, "type": role2}
-    ]
+        room = rooms_col.find_one({"room_key": room_key})
+        if room:
+            return jsonify({"room_id": str(room["_id"])})
 
-    # เรียงสมาชิกตาม id string เสมอ
-    members.sort(key=lambda m: str(m["id"]))
-
-    room = rooms_col.find_one({
-        "$and": [
-            {"members": {"$elemMatch": {"id": members[0]["id"], "type": members[0]["type"]}}},
-            {"members": {"$elemMatch": {"id": members[1]["id"], "type": members[1]["type"]}}}
+        members = [
+            {"id": ObjectId(user1), "type": role1},
+            {"id": ObjectId(user2), "type": role2}
         ]
-    })
 
-    if room:
-        return jsonify({"room_id": str(room["_id"])})
+        result = rooms_col.insert_one({
+            "type": "private",
+            "room_key": room_key,
+            "members": members,
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc)
+        })
+        return jsonify({"room_id": str(result.inserted_id)})
 
-    result = rooms_col.insert_one({
-        "type": "private",
-        "members": members,
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc)
-    })
+    except Exception as e:
+        return jsonify({"error": f"Invalid parameters: {str(e)}"}), 400
 
-    return jsonify({"room_id": str(result.inserted_id)})
 
 @app.route('/chat/<room_id>', methods=['GET'])
 def get_chat_history(room_id):
