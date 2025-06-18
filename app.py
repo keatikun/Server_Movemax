@@ -153,15 +153,16 @@ def get_or_create_room():
         user2 = request.args.get("user2")
         role1 = request.args.get("role1")
         role2 = request.args.get("role2")
+
         if not all([user1, user2, role1, role2]):
             raise ValueError("Missing parameters")
-        
-        # สร้าง room_key แบบเรียง id+role เสมอ
-        pair = sorted([
+
+        # ✅ สร้าง room_key แบบเรียงลำดับแน่นอน
+        ids = sorted([
             f"{user1}_{role1}",
             f"{user2}_{role2}"
         ])
-        room_key = "|".join(pair)
+        room_key = "|".join(ids)
 
         room = rooms_col.find_one({"room_key": room_key})
         if room:
@@ -183,6 +184,7 @@ def get_or_create_room():
 
     except Exception as e:
         return jsonify({"error": f"Invalid parameters: {str(e)}"}), 400
+
 
 
 @app.route('/chat/<room_id>', methods=['GET'])
