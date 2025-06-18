@@ -175,11 +175,16 @@ def get_or_create_room():
 
 @app.route('/chat/<room_id>', methods=['GET'])
 def get_chat_history(room_id):
-    messages = list(messages_col.find({"room_id": ObjectId(room_id)}).sort("timestamp", 1))
+    try:
+        room_obj_id = ObjectId(room_id)
+    except Exception as e:
+        return jsonify({"error": "Invalid room_id"}), 400
+    messages = list(messages_col.find({"room_id": room_obj_id}).sort("timestamp", 1))
     for msg in messages:
         msg["_id"] = str(msg["_id"])
         msg["timestamp"] = msg["timestamp"].isoformat()
     return jsonify(messages), 200
+
 
 @app.route('/chat/mark_read', methods=['POST'])
 def mark_as_read():
