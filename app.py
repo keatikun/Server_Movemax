@@ -151,30 +151,32 @@ def get_or_create_room():
         user2 = ObjectId(request.args.get("user2"))
         role1 = request.args.get("role1")
         role2 = request.args.get("role2")
-    except Exception:
+    except:
         return jsonify({"error": "Invalid parameters"}), 400
-    # หา room ที่มีสมาชิก 2 คนตามเงื่อนไข
+
+    members = [
+        {"id": user1, "type": role1},
+        {"id": user2, "type": role2}
+    ]
+
+    # 🔐 จัดเรียงสมาชิกให้ลำดับคงที่ (เรียงตาม string id)
+    members.sort(key=lambda m: str(m["id"]))
+
     room = rooms_col.find_one({
-        "$and": [
-            {"members": {"$elemMatch": {"id": user1, "type": role1}}},
-            {"members": {"$elemMatch": {"id": user2, "type": role2}}}
-        ],
-        "type": "private"  # ถ้าต้องการเจาะจงเฉพาะ private rooms
+        "members": {"$all": members}
     })
+
     if room:
         return jsonify({"room_id": str(room["_id"])})
 
-    # สร้างห้องใหม่ถ้าไม่เจอ
     result = rooms_col.insert_one({
         "type": "private",
-        "members": [
-            {"id": user1, "type": role1},
-            {"id": user2, "type": role2}
-        ],
+        "members": members,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc)
     })
     return jsonify({"room_id": str(result.inserted_id)})
+
 
 
 @app.route('/chat/<room_id>', methods=['GET'])
