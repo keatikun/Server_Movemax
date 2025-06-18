@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from flask_cors import CORS
 from config import MONGO_URI, SECRET_KEY
 from bson.objectid import ObjectId
-import pprint
 import logging
 
 app = Flask(__name__)
@@ -24,7 +23,7 @@ rooms_col = db["rooms"]
 reads_col = db["user_room_reads"]
 user_status_col = db["user_status"]
 
-logging.basicConfig(level=logging.DEBUG)
+
 
 connected_users = {}
 
@@ -155,7 +154,6 @@ def get_or_create_room():
         role1 = request.args.get("role1")
         role2 = request.args.get("role2")
     except Exception as e:
-        logging.error(f"Invalid parameters: {e}")
         return jsonify({"error": "Invalid parameters"}), 400
 
     members = [
@@ -163,11 +161,9 @@ def get_or_create_room():
         {"id": user2, "type": role2}
     ]
 
-    # เรียงสมาชิกตาม id string เพื่อให้ order คงที่
+    # เรียงสมาชิกตาม id string เสมอ
     members.sort(key=lambda m: str(m["id"]))
-    logging.debug(f"Searching room with members: {pprint.pformat(members)}")
 
-    # ค้นหาห้องโดยใช้ $and + $elemMatch แทน $all
     room = rooms_col.find_one({
         "$and": [
             {"members": {"$elemMatch": {"id": members[0]["id"], "type": members[0]["type"]}}},
@@ -176,22 +172,16 @@ def get_or_create_room():
     })
 
     if room:
-        logging.debug(f"Room found: {room['_id']}")
         return jsonify({"room_id": str(room["_id"])})
 
-    # สร้างห้องใหม่
     result = rooms_col.insert_one({
         "type": "private",
         "members": members,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc)
     })
-    logging.debug(f"Room created with id: {result.inserted_id}")
 
     return jsonify({"room_id": str(result.inserted_id)})
-
-
-
 
 @app.route('/chat/<room_id>', methods=['GET'])
 def get_chat_history(room_id):
