@@ -79,7 +79,6 @@ def create_mongo_indexes():
         rooms_col.create_index([("room_key", 1)], unique=True)
         # Index for efficient lookup of rooms a user is a member of
         rooms_col.create_index([("members.id", 1)])
-        # Index for sorting rooms by last updated (useful for chat list)
         rooms_col.create_index([("updated_at", -1)])
 
         # Indexes for message history and unread counts
@@ -334,6 +333,7 @@ def handle_connect():
     app.logger.debug(f"Socket: Client connected: {request.sid}")
     app.logger.info(f"Socket: Client {request.sid} connected.")
 
+
 @socketio.on('disconnect')
 def on_disconnect():
     sid = request.sid
@@ -342,13 +342,10 @@ def on_disconnect():
 
     user_id_str = sid_to_user_id.get(sid)
     if user_id_str:
-        # Remove sid from the user's session set
         connected_users_sessions.get(user_id_str, set()).discard(sid)
-        # Remove sid from the global mapping
         if sid in sid_to_user_id:
             del sid_to_user_id[sid]
 
-        # If no more active sessions for this user, mark as offline
         if not connected_users_sessions.get(user_id_str):
             try:
                 user_obj_id = ObjectId(user_id_str)
@@ -358,12 +355,9 @@ def on_disconnect():
                 )
                 app.logger.info(f"Socket: User {user_id_str} is now offline.")
                 
-                # --- OPTIMIZED BROADCAST for user_status_changed ---
-                # Instead of 'broadcast=True', notify only related users
                 updated_status = user_status_col.find_one({"user_id": user_obj_id})
                 if updated_status:
                     _notify_related_users_of_status_change(user_id_str, updated_status)
-                # --- End OPTIMIZED BROADCAST ---
             except Exception as e:
                 app.logger.error(f"Socket Error: Error updating user status on disconnect or broadcasting: {e}", exc_info=True)
     else:
@@ -389,12 +383,9 @@ def join_user_room(data):
                 upsert=True
             )
             
-            # --- OPTIMIZED BROADCAST for user_status_changed ---
-            # Instead of 'broadcast=True', notify only related users
             updated_status = user_status_col.find_one({"user_id": user_obj_id})
             if updated_status:
                 _notify_related_users_of_status_change(user_id_str, updated_status)
-            # --- End OPTIMIZED BROADCAST ---
             
         except Exception as e:
             app.logger.error(f"Socket Error: Error updating user status or broadcasting from join_user_room: {e}", exc_info=True)
@@ -446,7 +437,6 @@ def on_send_message(data):
                 member_id_obj = member['id']
                 member_id_str = str(member_id_obj)
 
-                # Messages are already optimized broadcast: emitted only to room members
                 socketio.emit('receive_message', serialized_msg, room=member_id_str)
                 app.logger.info(f"Socket: Emitted 'receive_message' for msg {serialized_msg['_id']} to room {member_id_str}")
 
@@ -508,7 +498,6 @@ def on_stop_typing(data):
 if __name__ == '__main__':
     import eventlet
     import eventlet.wsgi
-    # Set logging levels for Socket.IO and Engine.IO to DEBUG for maximum visibility.
     logging.getLogger('socketio').setLevel(logging.DEBUG)
     logging.getLogger('engineio').setLevel(logging.DEBUG)
     print("Starting production server on http://0.0.0.0:8080")
