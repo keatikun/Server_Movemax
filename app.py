@@ -57,42 +57,49 @@ def serialize_doc_for_json(doc):
     return serialized_doc
 
 # Configure logging for Flask app
-app.logger.setLevel(logging.DEBUG) # Set Flask app logger to DEBUG for maximum visibility
+app.logger.setLevel(logging.INFO) # Set desired logging level for Flask app
 handler = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 app.logger.addHandler(handler)
 
 # --- MongoDB Indexing ---
+# This function creates necessary indexes on application startup.
+# Indexes are crucial for database query performance, especially with a large number of users/messages.
 def create_mongo_indexes():
     app.logger.info("MongoDB: Checking and creating indexes...")
     try:
         # Index for faster user lookups by _id and username
-        users_col.create_index([("_id", 1)])
+        # Fix: Removed unique=True for _id index as it's automatically unique by MongoDB.
+        users_col.create_index([("_id", 1)]) # Corrected
         users_col.create_index([("username", 1)], unique=True)
 
         # Index for faster admin lookups
-        admins_col.create_index([("_id", 1)])
+        # Fix: Removed unique=True for _id index.
+        admins_col.create_index([("_id", 1)]) # Corrected
         admins_col.create_index([("username", 1)], unique=True)
 
         # Index for fast room lookup by room_key
         rooms_col.create_index([("room_key", 1)], unique=True)
         # Index for efficient lookup of rooms a user is a member of
         rooms_col.create_index([("members.id", 1)])
+        # Index for sorting rooms by last updated (useful for chat list)
         rooms_col.create_index([("updated_at", -1)])
 
         # Indexes for message history and unread counts
-        messages_col.create_index([("room_id", 1)])
-        messages_col.create_index([("timestamp", 1)])
-        messages_col.create_index([("room_id", 1), ("timestamp", 1)])
+        messages_col.create_index([("room_id", 1)]) # Efficiently find messages for a room
+        messages_col.create_index([("timestamp", 1)]) # Efficiently sort messages by time
+        messages_col.create_index([("room_id", 1), ("timestamp", 1)]) # Compound index for chat history query
 
         # Indexes for unread reads collection
         reads_col.create_index([("user_id", 1), ("room_id", 1)], unique=True)
+        # Index to sort by last_read_timestamp
         reads_col.create_index([("last_read_timestamp", 1)])
+
 
         # Index for user status lookups
         user_status_col.create_index([("user_id", 1)], unique=True)
-        user_status_col.create_index([("is_online", 1)])
+        user_status_col.create_index([("is_online", 1)]) # For quick lookup of online users
 
         app.logger.info("MongoDB: All indexes checked/created successfully.")
     except Exception as e:
@@ -101,36 +108,6 @@ def create_mongo_indexes():
 # Call index creation on application startup
 with app.app_context():
     create_mongo_indexes()
-
-
-# --- Helper function for Optimized Broadcasts of User Status ---
-def _notify_related_users_of_status_change(user_id_str, new_status_doc):
-    """
-    Notifies other users in shared chat rooms about a user's status change.
-    """
-    try:
-        user_obj_id = ObjectId(user_id_str)
-        serialized_status = serialize_doc_for_json(new_status_doc)
-        
-        # Find all rooms where this user is a member
-        # Using distinct to avoid sending multiple notifications for the same recipient
-        rooms_cursor = rooms_col.find({"members.id": user_obj_id})
-        
-        notified_users = set() # To track which users have already been notified
-        notified_users.add(user_id_str) # Don't notify the user themselves
-
-        for room_doc in rooms_cursor:
-            app.logger.debug(f"Socket: Processing room {room_doc['_id']} for status change of {user_id_str}")
-            if 'members' in room_doc:
-                for member in room_doc['members']:
-                    member_id_str = str(member['id'])
-                    if member_id_str != user_id_str and member_id_str not in notified_users:
-                        # Emit status change to the other member's personal Socket.IO room
-                        socketio.emit('user_status_changed', serialized_status, room=member_id_str)
-                        app.logger.info(f"Socket: Emitted user_status_changed for {user_id_str} to room {member_id_str}")
-                        notified_users.add(member_id_str) # Mark as notified
-    except Exception as e:
-        app.logger.error(f"Socket Error: Failed to notify related users of status change for {user_id_str}: {e}", exc_info=True)
 
 
 @app.route('/')
@@ -160,6 +137,7 @@ def get_unread_counts(user_id):
 
     unread_counts = {}
     
+    # --- OPTIMIZATION: Using MongoDB Aggregation Pipeline for efficient unread count calculation ---
     pipeline = [
         {"$match": {"user_id": user_obj_id}},
         {"$lookup": {
@@ -323,22 +301,14 @@ def mark_as_read():
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
 # Socket.IO event handlers
-@socketio.on_event
-def on_any_event(event, *args, **kwargs):
-    app.logger.debug(f"Socket: Received ANY event: {event}, Args: {args}, Kwargs: {kwargs}")
-
-
 @socketio.on('connect')
 def handle_connect():
-    app.logger.debug(f"Socket: Client connected: {request.sid}")
-    app.logger.info(f"Socket: Client {request.sid} connected.")
-
+    app.logger.info(f"Socket: Client connected: {request.sid}")
 
 @socketio.on('disconnect')
 def on_disconnect():
     sid = request.sid
-    app.logger.debug(f"Socket: Client disconnected: {sid}")
-    app.logger.info(f"Socket: Client {sid} disconnected.")
+    app.logger.info(f"Socket: Client disconnected: {sid}")
 
     user_id_str = sid_to_user_id.get(sid)
     if user_id_str:
@@ -357,7 +327,9 @@ def on_disconnect():
                 
                 updated_status = user_status_col.find_one({"user_id": user_obj_id})
                 if updated_status:
-                    _notify_related_users_of_status_change(user_id_str, updated_status)
+                    serialized_status = serialize_doc_for_json(updated_status)
+                    socketio.emit('user_status_changed', serialized_status, broadcast=True)
+                    app.logger.info(f"Socket: Broadcasted user {user_id_str} offline status: {serialized_status}")
             except Exception as e:
                 app.logger.error(f"Socket Error: Error updating user status on disconnect or broadcasting: {e}", exc_info=True)
     else:
@@ -367,7 +339,6 @@ def on_disconnect():
 @socketio.on('join_user_room')
 def join_user_room(data):
     user_id_str = data.get('userId')
-    app.logger.debug(f"Socket: Received join_user_room for userId: {user_id_str}, SID: {request.sid}")
     if user_id_str:
         join_room(user_id_str)
         app.logger.info(f"Socket: User {user_id_str} joined their personal Socket.IO room.")
@@ -385,14 +356,19 @@ def join_user_room(data):
             
             updated_status = user_status_col.find_one({"user_id": user_obj_id})
             if updated_status:
-                _notify_related_users_of_status_change(user_id_str, updated_status)
+                serialized_status = serialize_doc_for_json(updated_status)
+                socketio.emit('user_status_changed', serialized_status, broadcast=True)
+                app.logger.info(f"Socket: Broadcasted user {user_id_str} online status: {serialized_status}")
             
         except Exception as e:
             app.logger.error(f"Socket Error: Error updating user status or broadcasting from join_user_room: {e}", exc_info=True)
 
 @socketio.on('send_message')
 def on_send_message(data):
-    app.logger.debug(f"Socket: >>>>> on_send_message function entered. Raw data: {data}") 
+    # --- IMPORTANT: This is the added debug log to confirm function entry ---
+    app.logger.info(f"Socket: >>>>> on_send_message function entered. Raw data: {data}") 
+    # --- End of added debug log ---
+
     app.logger.info(f"Socket: Received send_message: {data}")
     room_id_str = data.get("room_id")
     sender_id_str = data.get("sender_id")
@@ -459,7 +435,6 @@ def on_send_message(data):
 
 @socketio.on('typing')
 def on_typing(data):
-    app.logger.debug(f"Socket: Received typing: {data}")
     room_id_str = data.get("room_id")
     user_id_str = data.get("user_id")
     if room_id_str and user_id_str:
@@ -478,7 +453,6 @@ def on_typing(data):
 
 @socketio.on('stop_typing')
 def on_stop_typing(data):
-    app.logger.debug(f"Socket: Received stop_typing: {data}")
     room_id_str = data.get("room_id")
     user_id_str = data.get("user_id")
     if room_id_str and user_id_str:
@@ -498,7 +472,7 @@ def on_stop_typing(data):
 if __name__ == '__main__':
     import eventlet
     import eventlet.wsgi
-    logging.getLogger('socketio').setLevel(logging.DEBUG)
-    logging.getLogger('engineio').setLevel(logging.DEBUG)
+    logging.getLogger('socketio').setLevel(logging.INFO)
+    logging.getLogger('engineio').setLevel(logging.INFO)
     print("Starting production server on http://0.0.0.0:8080")
     socketio.run(app, host='0.0.0.0', port=8080)
