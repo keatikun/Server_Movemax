@@ -371,6 +371,7 @@ def on_send_message(data):
     
     try:
         result = messages_col.insert_one(new_message)
+        # Fetch the inserted message to ensure all fields (like _id) are populated by MongoDB
         inserted_message = messages_col.find_one({"_id": result.inserted_id})
         
         rooms_col.update_one(
@@ -378,19 +379,23 @@ def on_send_message(data):
             {"$set": {"updated_at": datetime.now(timezone.utc)}}
         )
 
+        # Serialize the message for sending via socket (convert ObjectIds and datetimes)
         serialized_msg = serialize_doc_for_json(inserted_message)
         
+        # Get room members to send messages to their individual rooms
         room_doc = rooms_col.find_one({"_id": room_obj_id})
         if room_doc and 'members' in room_doc:
             for member in room_doc['members']:
-                member_id_obj = member['id']
-                member_id_str = str(member_id_obj)
+                member_id_obj = member['id'] # This is an ObjectId from the DB
+                member_id_str = str(member_id_obj) # Convert to string for Socket.IO room name
 
                 # Send 'receive_message' to the target user's personal room
+                # This is for clients currently in the specific chat room
                 socketio.emit('receive_message', serialized_msg, room=member_id_str)
                 app.logger.info(f"Socket: Emitted 'receive_message' for msg {serialized_msg['_id']} to room {member_id_str}")
 
                 # Send 'new_message' for updating unread counts or chat list previews
+                # Only send if the receiver is not the sender
                 if member_id_str != sender_id_str:
                     socketio.emit('new_message', serialized_msg, room=member_id_str)
                     app.logger.info(f"Socket: Emitted 'new_message' for msg {serialized_msg['_id']} to room {member_id_str} (unread for {member_id_str})")
