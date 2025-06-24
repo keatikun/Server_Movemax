@@ -324,7 +324,7 @@ def mark_as_read():
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
 # Socket.IO event handlers
-@socketio.on_event # New: Log all incoming Socket.IO events for debugging
+@socketio.on_event
 def on_any_event(event, *args, **kwargs):
     app.logger.debug(f"Socket: Received ANY event: {event}, Args: {args}, Kwargs: {kwargs}")
 
@@ -333,7 +333,6 @@ def on_any_event(event, *args, **kwargs):
 def handle_connect():
     app.logger.debug(f"Socket: Client connected: {request.sid}")
     app.logger.info(f"Socket: Client {request.sid} connected.")
-
 
 @socketio.on('disconnect')
 def on_disconnect():
