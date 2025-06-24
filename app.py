@@ -3,15 +3,15 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 from pymongo import MongoClient
 from datetime import datetime, timezone
 from flask_cors import CORS
-from config import MONGO_URI, SECRET_KEY
+from config import MONGO_URI, SECRET_KEY # Assuming config.py exists and works
 from bson.objectid import ObjectId
 import logging
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "*"}}) # Allow all origins for development
 
-socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True)
+socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True) # Enable logging for Socket.IO
 
 client = MongoClient(MONGO_URI)
 db = client["Movemax"]
@@ -24,66 +24,88 @@ reads_col = db["user_room_reads"]
 user_status_col = db["user_status"]
 
 # Global mappings for efficient Socket.IO session management
+# Stores which SIDs belong to a user_id (a user might have multiple connected devices/tabs)
 connected_users_sessions = {} # {user_id: {sid1, sid2, ...}}
+# Stores which user_id corresponds to a SID (for quick lookup on disconnect)
 sid_to_user_id = {} # {sid: user_id}
 
 # Helper function to convert ObjectId and datetime objects to string for JSON serialization
+# This ensures that PyMongo's BSON types are converted to JSON-compatible strings.
 def serialize_doc_for_json(doc):
     if doc is None:
         return None
+    # Create a copy to avoid modifying the original document from PyMongo result
     serialized_doc = doc.copy()
     
+    # Convert _id to string
     if '_id' in serialized_doc and isinstance(serialized_doc['_id'], ObjectId):
         serialized_doc['_id'] = str(serialized_doc['_id'])
     
+    # Handle nested ObjectIds in lists (e.g., 'members' in room document)
     if 'members' in serialized_doc and isinstance(serialized_doc['members'], list):
         for i, member in enumerate(serialized_doc['members']):
             if 'id' in member and isinstance(member['id'], ObjectId):
                 serialized_doc['members'][i]['id'] = str(member['id'])
 
+    # Convert datetime objects to ISO format string (e.g., for 'timestamp', 'created_at', 'updated_at', 'last_active')
     for key, value in serialized_doc.items():
         if isinstance(value, datetime):
-            serialized_doc[key] = value.isoformat() + 'Z'
-        elif isinstance(value, ObjectId):
+            serialized_doc[key] = value.isoformat() + 'Z' # 'Z' indicates UTC time
+        elif isinstance(value, ObjectId): # Catch any remaining ObjectIds not explicitly handled above
             serialized_doc[key] = str(value)
             
     return serialized_doc
 
 # Configure logging for Flask app
-app.logger.setLevel(logging.INFO)
+app.logger.setLevel(logging.INFO) # Set desired logging level for Flask app
 handler = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 app.logger.addHandler(handler)
 
 # --- MongoDB Indexing ---
+# This function creates necessary indexes on application startup.
+# Indexes are crucial for database query performance, especially with a large number of users/messages.
 def create_mongo_indexes():
     app.logger.info("MongoDB: Checking and creating indexes...")
     try:
-        users_col.create_index([("_id", 1)], unique=True)
+        # Index for faster user lookups by _id and username
+        # Fix: Removed unique=True for _id index as it's automatically unique by MongoDB.
+        users_col.create_index([("_id", 1)]) # Corrected
         users_col.create_index([("username", 1)], unique=True)
 
-        admins_col.create_index([("_id", 1)], unique=True)
+        # Index for faster admin lookups
+        # Fix: Removed unique=True for _id index.
+        admins_col.create_index([("_id", 1)]) # Corrected
         admins_col.create_index([("username", 1)], unique=True)
 
+        # Index for fast room lookup by room_key
         rooms_col.create_index([("room_key", 1)], unique=True)
+        # Index for efficient lookup of rooms a user is a member of
         rooms_col.create_index([("members.id", 1)])
+        # Index for sorting rooms by last updated (useful for chat list)
         rooms_col.create_index([("updated_at", -1)])
 
-        messages_col.create_index([("room_id", 1)])
-        messages_col.create_index([("timestamp", 1)])
-        messages_col.create_index([("room_id", 1), ("timestamp", 1)])
+        # Indexes for message history and unread counts
+        messages_col.create_index([("room_id", 1)]) # Efficiently find messages for a room
+        messages_col.create_index([("timestamp", 1)]) # Efficiently sort messages by time
+        messages_col.create_index([("room_id", 1), ("timestamp", 1)]) # Compound index for chat history query
 
+        # Indexes for unread reads collection
         reads_col.create_index([("user_id", 1), ("room_id", 1)], unique=True)
+        # Index to sort by last_read_timestamp
         reads_col.create_index([("last_read_timestamp", 1)])
 
+
+        # Index for user status lookups
         user_status_col.create_index([("user_id", 1)], unique=True)
-        user_status_col.create_index([("is_online", 1)])
+        user_status_col.create_index([("is_online", 1)]) # For quick lookup of online users
 
         app.logger.info("MongoDB: All indexes checked/created successfully.")
     except Exception as e:
         app.logger.error(f"MongoDB Error: Failed to create indexes: {e}", exc_info=True)
 
+# Call index creation on application startup
 with app.app_context():
     create_mongo_indexes()
 
@@ -115,6 +137,7 @@ def get_unread_counts(user_id):
 
     unread_counts = {}
     
+    # --- OPTIMIZATION: Using MongoDB Aggregation Pipeline for efficient unread count calculation ---
     pipeline = [
         {"$match": {"user_id": user_obj_id}},
         {"$lookup": {
@@ -340,15 +363,13 @@ def join_user_room(data):
         except Exception as e:
             app.logger.error(f"Socket Error: Error updating user status or broadcasting from join_user_room: {e}", exc_info=True)
 
-    # app.py (relevant part)
-
 @socketio.on('send_message')
 def on_send_message(data):
-    # --- เพิ่มบรรทัดนี้ ---
+    # --- IMPORTANT: This is the added debug log to confirm function entry ---
     app.logger.info(f"Socket: >>>>> on_send_message function entered. Raw data: {data}") 
-    # --- สิ้นสุดการเพิ่ม ---
+    # --- End of added debug log ---
 
-    app.logger.info(f"Socket: Received send_message: {data}") # บรรทัดเดิมของคุณ
+    app.logger.info(f"Socket: Received send_message: {data}")
     room_id_str = data.get("room_id")
     sender_id_str = data.get("sender_id")
     sender_type = data.get("sender_type")
@@ -410,7 +431,6 @@ def on_send_message(data):
 
     except Exception as e:
         app.logger.error(f"Socket Error: Error sending message or broadcasting: {e}", exc_info=True)
-
 
 
 @socketio.on('typing')
