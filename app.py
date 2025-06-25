@@ -11,6 +11,18 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 CORS(app, resources={r"/*": {"origins": "*"}}) # Allow all origins for development
 
+# Set desired logging level for Flask app and Socket.IO
+# INFO level is suitable for production to keep logs concise
+# DEBUG can be used for deep debugging if needed
+app.logger.setLevel(logging.INFO)
+logging.getLogger('socketio').setLevel(logging.INFO)
+logging.getLogger('engineio').setLevel(logging.INFO)
+
+handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+app.logger.addHandler(handler)
+
 socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True) # Enable logging for Socket.IO
 
 client = MongoClient(MONGO_URI)
@@ -56,12 +68,6 @@ def serialize_doc_for_json(doc):
             
     return serialized_doc
 
-# Configure logging for Flask app
-app.logger.setLevel(logging.INFO) # Set desired logging level for Flask app
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-app.logger.addHandler(handler)
 
 # --- MongoDB Indexing ---
 # This function creates necessary indexes on application startup.
@@ -70,13 +76,11 @@ def create_mongo_indexes():
     app.logger.info("MongoDB: Checking and creating indexes...")
     try:
         # Index for faster user lookups by _id and username
-        # Fix: Removed unique=True for _id index as it's automatically unique by MongoDB.
-        users_col.create_index([("_id", 1)]) # Corrected
+        users_col.create_index([("_id", 1)]) 
         users_col.create_index([("username", 1)], unique=True)
 
         # Index for faster admin lookups
-        # Fix: Removed unique=True for _id index.
-        admins_col.create_index([("_id", 1)]) # Corrected
+        admins_col.create_index([("_id", 1)])
         admins_col.create_index([("username", 1)], unique=True)
 
         # Index for fast room lookup by room_key
@@ -96,7 +100,6 @@ def create_mongo_indexes():
         # Index to sort by last_read_timestamp
         reads_col.create_index([("last_read_timestamp", 1)])
 
-
         # Index for user status lookups
         user_status_col.create_index([("user_id", 1)], unique=True)
         user_status_col.create_index([("is_online", 1)]) # For quick lookup of online users
@@ -108,6 +111,41 @@ def create_mongo_indexes():
 # Call index creation on application startup
 with app.app_context():
     create_mongo_indexes()
+
+
+# --- Helper function for Optimized Broadcasts of User Status ---
+def _notify_related_users_of_status_change(user_id_str, new_status_doc):
+    """
+    Notifies other users in shared chat rooms about a user's status change.
+    Instead of broadcasting to all connected clients, this function
+    finds users who share at least one chat room with the changing user
+    and emits the status update only to their personal Socket.IO rooms.
+    This significantly reduces server load and network traffic for status updates.
+    """
+    try:
+        user_obj_id = ObjectId(user_id_str)
+        serialized_status = serialize_doc_for_json(new_status_doc)
+        
+        # Find all rooms where this user is a member
+        rooms_cursor = rooms_col.find({"members.id": user_obj_id})
+        
+        notified_users = set() # To track which users have already been notified
+        notified_users.add(user_id_str) # Do not notify the user themselves
+
+        for room_doc in rooms_cursor:
+            app.logger.debug(f"Socket: Processing room {room_doc['_id']} for status change of {user_id_str}")
+            if 'members' in room_doc:
+                for member in room_doc['members']:
+                    member_id_str = str(member['id'])
+                    # If the member is not the current user and hasn't been notified yet
+                    if member_id_str != user_id_str and member_id_str not in notified_users:
+                        # Emit status change to the other member's personal Socket.IO room
+                        # Each user client joins their own room (identified by their userId)
+                        socketio.emit('user_status_changed', serialized_status, room=member_id_str)
+                        app.logger.info(f"Socket: Emitted user_status_changed for {user_id_str} to room {member_id_str}")
+                        notified_users.add(member_id_str) # Mark as notified
+    except Exception as e:
+        app.logger.error(f"Socket Error: Failed to notify related users of status change for {user_id_str}: {e}", exc_info=True)
 
 
 @app.route('/')
@@ -137,7 +175,7 @@ def get_unread_counts(user_id):
 
     unread_counts = {}
     
-    # --- OPTIMIZATION: Using MongoDB Aggregation Pipeline for efficient unread count calculation ---
+    # Using MongoDB Aggregation Pipeline for efficient unread count calculation
     pipeline = [
         {"$match": {"user_id": user_obj_id}},
         {"$lookup": {
@@ -176,6 +214,7 @@ def get_unread_counts(user_id):
         for res in results:
             unread_counts[res["room_id"]] = res["unread_count"]
         
+        # Also include rooms where the user is a member but has no read record yet
         user_rooms_not_in_reads = rooms_col.find({
             "members.id": user_obj_id,
             "_id": {"$nin": [ObjectId(rid) for rid in unread_counts.keys()]}
@@ -301,9 +340,16 @@ def mark_as_read():
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
 # Socket.IO event handlers
+# A general listener for all Socket.IO events (useful for debugging, but can be removed in production for performance)
+@socketio.on_event
+def on_any_event(event, *args, **kwargs):
+    app.logger.debug(f"Socket: Received ANY event: {event}, Args: {args}, Kwargs: {kwargs}")
+
+
 @socketio.on('connect')
 def handle_connect():
     app.logger.info(f"Socket: Client connected: {request.sid}")
+
 
 @socketio.on('disconnect')
 def on_disconnect():
@@ -312,10 +358,13 @@ def on_disconnect():
 
     user_id_str = sid_to_user_id.get(sid)
     if user_id_str:
+        # Remove SID from the user's connected sessions set
         connected_users_sessions.get(user_id_str, set()).discard(sid)
+        # Remove SID from the global SID to user_id mapping
         if sid in sid_to_user_id:
             del sid_to_user_id[sid]
 
+        # If no more active sessions for this user, mark them as offline
         if not connected_users_sessions.get(user_id_str):
             try:
                 user_obj_id = ObjectId(user_id_str)
@@ -327,11 +376,12 @@ def on_disconnect():
                 
                 updated_status = user_status_col.find_one({"user_id": user_obj_id})
                 if updated_status:
-                    serialized_status = serialize_doc_for_json(updated_status)
-                    socketio.emit('user_status_changed', serialized_status, broadcast=True)
-                    app.logger.info(f"Socket: Broadcasted user {user_id_str} offline status: {serialized_status}")
+                    # --- OPTIMIZED BROADCAST for user_status_changed on disconnect ---
+                    # Notify only related users instead of broadcasting to everyone.
+                    _notify_related_users_of_status_change(user_id_str, updated_status)
+                    # --- End OPTIMIZED BROADCAST ---
             except Exception as e:
-                app.logger.error(f"Socket Error: Error updating user status on disconnect or broadcasting: {e}", exc_info=True)
+                app.logger.error(f"Socket Error: Error updating user status on disconnect or notifying: {e}", exc_info=True)
     else:
         app.logger.info(f"Socket: Disconnected client {sid} was not a known user session.")
 
@@ -340,9 +390,12 @@ def on_disconnect():
 def join_user_room(data):
     user_id_str = data.get('userId')
     if user_id_str:
+        # Each client joins a unique room identified by their user_id.
+        # This allows targeted emissions to specific users (e.g., status updates).
         join_room(user_id_str)
         app.logger.info(f"Socket: User {user_id_str} joined their personal Socket.IO room.")
         
+        # Track connected SIDs for each user
         connected_users_sessions.setdefault(user_id_str, set()).add(request.sid)
         sid_to_user_id[request.sid] = user_id_str
 
@@ -356,19 +409,16 @@ def join_user_room(data):
             
             updated_status = user_status_col.find_one({"user_id": user_obj_id})
             if updated_status:
-                serialized_status = serialize_doc_for_json(updated_status)
-                socketio.emit('user_status_changed', serialized_status, broadcast=True)
-                app.logger.info(f"Socket: Broadcasted user {user_id_str} online status: {serialized_status}")
+                # --- OPTIMIZED BROADCAST for user_status_changed on connect ---
+                # Notify only related users instead of broadcasting to everyone.
+                _notify_related_users_of_status_change(user_id_str, updated_status)
+                # --- End OPTIMIZED BROADCAST ---
             
         except Exception as e:
-            app.logger.error(f"Socket Error: Error updating user status or broadcasting from join_user_room: {e}", exc_info=True)
+            app.logger.error(f"Socket Error: Error updating user status on connect or notifying: {e}", exc_info=True)
 
 @socketio.on('send_message')
 def on_send_message(data):
-    # --- IMPORTANT: This is the added debug log to confirm function entry ---
-    app.logger.info(f"Socket: >>>>> on_send_message function entered. Raw data: {data}") 
-    # --- End of added debug log ---
-
     app.logger.info(f"Socket: Received send_message: {data}")
     room_id_str = data.get("room_id")
     sender_id_str = data.get("sender_id")
@@ -397,9 +447,11 @@ def on_send_message(data):
     }
     
     try:
+        # Insert message into MongoDB
         result = messages_col.insert_one(new_message)
         inserted_message = messages_col.find_one({"_id": result.inserted_id})
         
+        # Update room's last updated timestamp
         rooms_col.update_one(
             {"_id": room_obj_id},
             {"$set": {"updated_at": datetime.now(timezone.utc)}}
@@ -407,19 +459,24 @@ def on_send_message(data):
 
         serialized_msg = serialize_doc_for_json(inserted_message)
         
+        # Retrieve room members to send targeted messages
         room_doc = rooms_col.find_one({"_id": room_obj_id})
         if room_doc and 'members' in room_doc:
             for member in room_doc['members']:
                 member_id_obj = member['id']
                 member_id_str = str(member_id_obj)
 
+                # Emit 'receive_message' to all members of the room
+                # Each client listens to their own user_id room, so we emit to that room.
                 socketio.emit('receive_message', serialized_msg, room=member_id_str)
                 app.logger.info(f"Socket: Emitted 'receive_message' for msg {serialized_msg['_id']} to room {member_id_str}")
 
+                # If the recipient is not the sender, also send 'new_message' for unread notification
                 if member_id_str != sender_id_str:
                     socketio.emit('new_message', serialized_msg, room=member_id_str)
                     app.logger.info(f"Socket: Emitted 'new_message' for msg {serialized_msg['_id']} to room {member_id_str} (unread for {member_id_str})")
 
+                    # Increment unread count for the recipient
                     reads_col.update_one(
                         {"user_id": member_id_obj, "room_id": room_obj_id},
                         {"$inc": {"unread_count": 1}},
@@ -435,6 +492,7 @@ def on_send_message(data):
 
 @socketio.on('typing')
 def on_typing(data):
+    # This event is already optimized as it emits to specific room members.
     room_id_str = data.get("room_id")
     user_id_str = data.get("user_id")
     if room_id_str and user_id_str:
@@ -444,6 +502,7 @@ def on_typing(data):
             if room_doc and 'members' in room_doc:
                 for member in room_doc['members']:
                     member_id_str = str(member['id'])
+                    # Send typing event only to the OTHER member in the room
                     if member_id_str != user_id_str:
                         emit('typing', {'user_id': user_id_str}, room=member_id_str)
                         app.logger.info(f"Socket: Typing event from {user_id_str} to {member_id_str} in room {room_id_str}")
@@ -453,6 +512,7 @@ def on_typing(data):
 
 @socketio.on('stop_typing')
 def on_stop_typing(data):
+    # This event is already optimized as it emits to specific room members.
     room_id_str = data.get("room_id")
     user_id_str = data.get("user_id")
     if room_id_str and user_id_str:
@@ -462,6 +522,7 @@ def on_stop_typing(data):
             if room_doc and 'members' in room_doc:
                 for member in room_doc['members']:
                     member_id_str = str(member['id'])
+                    # Send stop_typing event only to the OTHER member in the room
                     if member_id_str != user_id_str:
                         emit('stop_typing', {'user_id': user_id_str}, room=member_id_str)
                         app.logger.info(f"Socket: Stop Typing event from {user_id_str} to {member_id_str} in room {room_id_str}")
@@ -472,7 +533,5 @@ def on_stop_typing(data):
 if __name__ == '__main__':
     import eventlet
     import eventlet.wsgi
-    logging.getLogger('socketio').setLevel(logging.INFO)
-    logging.getLogger('engineio').setLevel(logging.INFO)
-    print("Starting production server on http://0.0.0.0:8080")
+    app.logger.info("Starting production server on http://0.0.0.0:8080")
     socketio.run(app, host='0.0.0.0', port=8080)
