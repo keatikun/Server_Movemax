@@ -11,12 +11,11 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 CORS(app, resources={r"/*": {"origins": "*"}}) # Allow all origins for development
 
-# Set desired logging level for Flask app and Socket.IO
-# INFO level is suitable for production to keep logs concise
-# DEBUG can be used for deep debugging if needed
-app.logger.setLevel(logging.INFO)
-logging.getLogger('socketio').setLevel(logging.INFO)
-logging.getLogger('engineio').setLevel(logging.INFO)
+# Set logging levels for Flask app, Socket.IO, and Engine.IO to DEBUG for maximum visibility during troubleshooting.
+# Once resolved, these can be changed back to INFO.
+app.logger.setLevel(logging.DEBUG) 
+logging.getLogger('socketio').setLevel(logging.DEBUG)
+logging.getLogger('engineio').setLevel(logging.DEBUG)
 
 handler = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -87,7 +86,6 @@ def create_mongo_indexes():
         rooms_col.create_index([("room_key", 1)], unique=True)
         # Index for efficient lookup of rooms a user is a member of
         rooms_col.create_index([("members.id", 1)])
-        # Index for sorting rooms by last updated (useful for chat list)
         rooms_col.create_index([("updated_at", -1)])
 
         # Indexes for message history and unread counts
@@ -340,7 +338,8 @@ def mark_as_read():
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
 # Socket.IO event handlers
-# A general listener for all Socket.IO events (useful for debugging, but can be removed in production for performance)
+# CRITICAL: Ensure NO blank lines or extra indentation between @socketio.on_event and def on_any_event.
+# The `on_any_event` function must immediately follow its decorator for it to work correctly.
 @socketio.on_event
 def on_any_event(event, *args, **kwargs):
     app.logger.debug(f"Socket: Received ANY event: {event}, Args: {args}, Kwargs: {kwargs}")
