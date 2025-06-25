@@ -11,11 +11,10 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 CORS(app, resources={r"/*": {"origins": "*"}}) # Allow all origins for development
 
-# Set logging levels for Flask app, Socket.IO, and Engine.IO to DEBUG for maximum visibility during troubleshooting.
-# Once resolved, these can be changed back to INFO.
-app.logger.setLevel(logging.DEBUG) 
-logging.getLogger('socketio').setLevel(logging.DEBUG)
-logging.getLogger('engineio').setLevel(logging.DEBUG)
+# Set logging levels for Flask app, Socket.IO, and Engine.IO to INFO for production.
+app.logger.setLevel(logging.INFO) 
+logging.getLogger('socketio').setLevel(logging.INFO)
+logging.getLogger('engineio').setLevel(logging.INFO)
 
 handler = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -338,17 +337,9 @@ def mark_as_read():
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
 # Socket.IO event handlers
-# CRITICAL: Ensure NO blank lines or extra indentation between @socketio.on_event and def on_any_event.
-# The `on_any_event` function must immediately follow its decorator for it to work correctly.
-@socketio.on_event
-def on_any_event(event, *args, **kwargs):
-    app.logger.debug(f"Socket: Received ANY event: {event}, Args: {args}, Kwargs: {kwargs}")
-
-
 @socketio.on('connect')
 def handle_connect():
     app.logger.info(f"Socket: Client connected: {request.sid}")
-
 
 @socketio.on('disconnect')
 def on_disconnect():
@@ -375,10 +366,9 @@ def on_disconnect():
                 
                 updated_status = user_status_col.find_one({"user_id": user_obj_id})
                 if updated_status:
-                    # --- OPTIMIZED BROADCAST for user_status_changed on disconnect ---
-                    # Notify only related users instead of broadcasting to everyone.
+                    # --- Optimized: Call helper to notify only related users instead of broadcasting to all ---
                     _notify_related_users_of_status_change(user_id_str, updated_status)
-                    # --- End OPTIMIZED BROADCAST ---
+                    # --- End Optimized ---
             except Exception as e:
                 app.logger.error(f"Socket Error: Error updating user status on disconnect or notifying: {e}", exc_info=True)
     else:
@@ -408,10 +398,9 @@ def join_user_room(data):
             
             updated_status = user_status_col.find_one({"user_id": user_obj_id})
             if updated_status:
-                # --- OPTIMIZED BROADCAST for user_status_changed on connect ---
-                # Notify only related users instead of broadcasting to everyone.
+                # --- Optimized: Call helper to notify only related users instead of broadcasting to all ---
                 _notify_related_users_of_status_change(user_id_str, updated_status)
-                # --- End OPTIMIZED BROADCAST ---
+                # --- End Optimized ---
             
         except Exception as e:
             app.logger.error(f"Socket Error: Error updating user status on connect or notifying: {e}", exc_info=True)
