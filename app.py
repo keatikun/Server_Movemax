@@ -201,7 +201,7 @@ def get_unread_counts(user_id):
         {"$unwind": {"path": "$unread_messages_count_result", "preserveNullAndEmptyArrays": True}},
         {"$project": {
             "_id": 0,
-            "room_id": {"$toString": "$room_id"},
+            "room_id": {"$toString": "$room_info._id"}, # Use room_info._id to map back to the room's actual ID
             "unread_count": {"$ifNull": ["$unread_messages_count_result.unreadMessages", 0]}
         }}
     ]
@@ -212,9 +212,10 @@ def get_unread_counts(user_id):
             unread_counts[res["room_id"]] = res["unread_count"]
         
         # Also include rooms where the user is a member but has no read record yet
+        # For these rooms, all messages are considered unread if no read record exists
         user_rooms_not_in_reads = rooms_col.find({
             "members.id": user_obj_id,
-            "_id": {"$nin": [ObjectId(rid) for rid in unread_counts.keys()]}
+            "_id": {"$nin": [ObjectId(rid) for rid in unread_counts.keys()]} # Exclude rooms already counted
         })
         for room in user_rooms_not_in_reads:
             total_messages_in_room = messages_col.count_documents({"room_id": room["_id"]})
