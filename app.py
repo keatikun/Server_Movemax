@@ -162,27 +162,77 @@ def get_admins():
     admins = list(admins_col.find({}, {"password": 0}))
     return jsonify([serialize_doc_for_json(a) for a in admins]), 200
 
-# --- NEW API ENDPOINT FOR LAST MESSAGE ---
-@app.route('/api/last_message/<room_id>', methods=['GET'])
-def get_last_message(room_id):
-    app.logger.info(f"API: Fetching last message for room: {room_id}")
+# --- NEW API ENDPOINT FOR LAST MESSAGE OF ALL CONVERSATIONS FOR A GIVEN USER ---
+@app.route('/api/last_messages_for_user/<user_id>', methods=['GET'])
+def get_last_messages_for_user(user_id):
+    app.logger.info(f"API: Fetching last messages for all rooms of user: {user_id}")
     try:
-        room_obj_id = ObjectId(room_id)
+        user_obj_id = ObjectId(user_id)
     except Exception as e:
-        app.logger.error(f"API Error: Invalid room_id format for last message: {room_id}, Error: {e}", exc_info=True)
-        return jsonify({"error": "Invalid room_id format"}), 400
+        app.logger.error(f"API Error: Invalid user_id format for last messages: {user_id}, Error: {e}", exc_info=True)
+        return jsonify({"error": "Invalid user_id format"}), 400
 
-    last_message = messages_col.find_one(
-        {"room_id": room_obj_id},
-        sort=[("timestamp", -1)] # Sort descending to get the latest message first
-    )
+    pipeline = [
+        # Match rooms where the current user is a member
+        {"$match": {"members.id": user_obj_id}},
+        # Lookup messages for these rooms
+        {"$lookup": {
+            "from": "messages",
+            "localField": "_id",
+            "foreignField": "room_id",
+            "as": "room_messages"
+        }},
+        # Unwind messages to work with each message individually
+        {"$unwind": {"path": "$room_messages", "preserveNullAndEmptyArrays": True}},
+        # Sort messages by timestamp descending to get the latest first
+        {"$sort": {"room_messages.timestamp": -1}},
+        # Group by room_id to get the latest message for each room
+        {"$group": {
+            "_id": "$_id", # Room ID
+            "members": {"$first": "$members"}, # Keep members of the room
+            "last_message": {"$first": "$room_messages"} # Get the latest message
+        }},
+        # Project to format the output and find the chat partner
+        {"$project": {
+            "_id": 0, # Exclude default _id
+            "room_id": {"$toString": "$_id"},
+            "last_message": "$last_message",
+            "chat_partner_id": {
+                "$arrayElemAt": [
+                    {"$filter": {
+                        "input": "$members",
+                        "as": "member",
+                        "cond": {"$ne": ["$$member.id", user_obj_id]}
+                    }},
+                    0
+                ]
+            }
+        }},
+        # Final projection to get the desired structure: {chat_partner_id: last_message}
+        {"$project": {
+            "chat_partner_id": {"$toString": "$chat_partner_id.id"}, # Convert partner ObjectId to string
+            "last_message": "$last_message"
+        }}
+    ]
 
-    if last_message:
-        app.logger.info(f"API Success: Found last message for room {room_id}.")
-        return jsonify(serialize_doc_for_json(last_message)), 200
-    else:
-        app.logger.info(f"API Info: No messages in room {room_id}.")
-        return jsonify({"message": "No messages in this room"}), 200 # Return 200 with a message indicating no messages
+    try:
+        results = list(rooms_col.aggregate(pipeline))
+        
+        # Format the results into a dictionary {chat_partner_id: last_message_data}
+        response_data = {}
+        for res in results:
+            chat_partner_id = res.get('chat_partner_id')
+            last_message_doc = res.get('last_message')
+            if chat_partner_id: # Only add if chat_partner_id is found (should always be for 1-1 chats)
+                response_data[chat_partner_id] = serialize_doc_for_json(last_message_doc)
+        
+        app.logger.info(f"API Success: Fetched last messages for user {user_id}. Count: {len(response_data)}")
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        app.logger.error(f"API Error: Failed to fetch last messages for user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": f"Internal Server Error: {e}"}), 500
+
 
 @app.route('/api/unread_counts/<user_id>', methods=['GET'])
 def get_unread_counts(user_id):
