@@ -60,7 +60,8 @@ def serialize_doc_for_json(doc):
     # Convert datetime objects to ISO format string (e.g., for 'timestamp', 'created_at', 'updated_at', 'last_active')
     for key, value in serialized_doc.items():
         if isinstance(value, datetime):
-            serialized_doc[key] = value.isoformat() + 'Z' # 'Z' indicates UTC time
+            # Ensure timestamp is in UTC ISO format (e.g., '2023-10-27T10:00:00.000Z')
+            serialized_doc[key] = value.replace(tzinfo=timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
         elif isinstance(value, ObjectId): # Catch any remaining ObjectIds not explicitly handled above
             serialized_doc[key] = str(value)
             
@@ -160,6 +161,28 @@ def get_admins():
     app.logger.info("API: Fetching all admins.")
     admins = list(admins_col.find({}, {"password": 0}))
     return jsonify([serialize_doc_for_json(a) for a in admins]), 200
+
+# --- NEW API ENDPOINT FOR LAST MESSAGE ---
+@app.route('/api/last_message/<room_id>', methods=['GET'])
+def get_last_message(room_id):
+    app.logger.info(f"API: Fetching last message for room: {room_id}")
+    try:
+        room_obj_id = ObjectId(room_id)
+    except Exception as e:
+        app.logger.error(f"API Error: Invalid room_id format for last message: {room_id}, Error: {e}", exc_info=True)
+        return jsonify({"error": "Invalid room_id format"}), 400
+
+    last_message = messages_col.find_one(
+        {"room_id": room_obj_id},
+        sort=[("timestamp", -1)] # Sort descending to get the latest message first
+    )
+
+    if last_message:
+        app.logger.info(f"API Success: Found last message for room {room_id}.")
+        return jsonify(serialize_doc_for_json(last_message)), 200
+    else:
+        app.logger.info(f"API Info: No messages in room {room_id}.")
+        return jsonify({"message": "No messages in this room"}), 200 # Return 200 with a message indicating no messages
 
 @app.route('/api/unread_counts/<user_id>', methods=['GET'])
 def get_unread_counts(user_id):
@@ -524,3 +547,4 @@ if __name__ == '__main__':
     import eventlet.wsgi
     app.logger.info("Starting production server on http://0.0.0.0:8080")
     socketio.run(app, host='0.0.0.0', port=8080)
+
