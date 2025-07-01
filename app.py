@@ -17,7 +17,7 @@ logging.getLogger('socketio').setLevel(logging.INFO)
 logging.getLogger('engineio').setLevel(logging.INFO)
 
 handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(%(message)s')
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 app.logger.addHandler(handler)
 
@@ -493,7 +493,7 @@ def get_or_create_room():
         return jsonify({"room_id": str(result.inserted_id)})
 
     except Exception as e:
-        app.logger.error(f"API Error: Failed to get/create room: {e}", exc_info=True)
+        app.logger.error(f"API Error: Failed to get/create room: {str(e)}" , exc_info=True)
         return jsonify({"error": f"Failed to get/create room: {str(e)}"}), 500
 
 
@@ -542,7 +542,7 @@ def mark_as_read():
 
 # Socket.IO event handlers
 @socketio.on('connect')
-def handle_connect():
+def handle_connect(*args, **kwargs): # FIX: Accept any arguments passed by Flask-SocketIO
     app.logger.info(f"Socket: Client connected: {request.sid}")
 
 @socketio.on('disconnect')
