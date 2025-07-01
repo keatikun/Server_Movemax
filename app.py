@@ -17,7 +17,7 @@ logging.getLogger('socketio').setLevel(logging.INFO)
 logging.getLogger('engineio').setLevel(logging.INFO)
 
 handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(%(message)s')
 handler.setFormatter(formatter)
 app.logger.addHandler(handler)
 
@@ -233,7 +233,7 @@ def get_last_messages_for_user(user_id):
         app.logger.error(f"API Error: Failed to fetch last messages for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
-# --- NEW API ENDPOINT FOR ALL USER STATUSES (FOR ADMIN HOME SCREEN) ---
+# --- NEW API ENDPOINT FOR ALL USER STATUSES (FOR ADMIN HOME SCREEN & USER HOME SCREEN) ---
 @app.route('/api/all_user_statuses', methods=['GET'])
 def get_all_user_statuses():
     app.logger.info("API: Fetching all user statuses.")
@@ -316,6 +316,51 @@ def get_last_messages_for_admin_conversations(admin_id):
 
     except Exception as e:
         app.logger.error(f"API Error: Failed to fetch last messages for admin {admin_id}: {e}", exc_info=True)
+        return jsonify({"error": f"Internal Server Error: {e}"}), 500
+
+
+# --- NEW API ENDPOINT FOR USER ROOM MAPPINGS (FOR FASTER ROOM ID RETRIEVAL) ---
+@app.route('/api/user_room_mappings/<user_id>', methods=['GET'])
+def get_user_room_mappings(user_id):
+    app.logger.info(f"API: Fetching room mappings for user: {user_id}")
+    try:
+        user_obj_id = ObjectId(user_id)
+    except Exception as e:
+        app.logger.error(f"API Error: Invalid user_id format for room mappings: {user_id}, Error: {e}", exc_info=True)
+        return jsonify({"error": "Invalid user_id format"}), 400
+
+    pipeline = [
+        {"$match": {"members.id": user_obj_id}},
+        {"$project": {
+            "_id": 0,
+            "room_id": {"$toString": "$_id"},
+            "chat_partner_id": {
+                "$arrayElemAt": [
+                    {"$filter": {
+                        "input": "$members",
+                        "as": "member",
+                        "cond": {"$ne": ["$$member.id", user_obj_id]}
+                    }},
+                    0
+                ]
+            }
+        }},
+        {"$project": {
+            "room_id": 1,
+            "chat_partner_id": {"$toString": "$chat_partner_id.id"}
+        }}
+    ]
+
+    try:
+        results = list(rooms_col.aggregate(pipeline))
+        room_mappings = {}
+        for res in results:
+            if res.get('chat_partner_id') and res.get('room_id'):
+                room_mappings[res['chat_partner_id']] = res['room_id']
+        app.logger.info(f"API Success: Fetched room mappings for user {user_id}. Count: {len(room_mappings)}")
+        return jsonify(room_mappings), 200
+    except Exception as e:
+        app.logger.error(f"API Error: Failed to fetch room mappings for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
 
