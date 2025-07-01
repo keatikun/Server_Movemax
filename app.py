@@ -162,7 +162,7 @@ def get_admins():
     admins = list(admins_col.find({}, {"password": 0}))
     return jsonify([serialize_doc_for_json(a) for a in admins]), 200
 
-# --- NEW API ENDPOINT FOR LAST MESSAGE OF ALL CONVERSATIONS FOR A GIVEN USER ---
+# --- NEW API ENDPOINT FOR LAST MESSAGE OF ALL CONVERSATIONS FOR A GIVEN USER (FOR USER HOME SCREEN) ---
 @app.route('/api/last_messages_for_user/<user_id>', methods=['GET'])
 def get_last_messages_for_user(user_id):
     app.logger.info(f"API: Fetching last messages for all rooms of user: {user_id}")
@@ -185,7 +185,7 @@ def get_last_messages_for_user(user_id):
         # Unwind messages to work with each message individually
         {"$unwind": {"path": "$room_messages", "preserveNullAndEmptyArrays": True}},
         # Sort messages by timestamp descending to get the latest first
-        {"$sort": {"room_messages.timestamp": -1}},
+        {"$sort": {"_id": 1, "room_messages.timestamp": -1}}, # Sort by room_id then timestamp
         # Group by room_id to get the latest message for each room
         {"$group": {
             "_id": "$_id", # Room ID
@@ -231,6 +231,91 @@ def get_last_messages_for_user(user_id):
 
     except Exception as e:
         app.logger.error(f"API Error: Failed to fetch last messages for user {user_id}: {e}", exc_info=True)
+        return jsonify({"error": f"Internal Server Error: {e}"}), 500
+
+# --- NEW API ENDPOINT FOR ALL USER STATUSES (FOR ADMIN HOME SCREEN) ---
+@app.route('/api/all_user_statuses', methods=['GET'])
+def get_all_user_statuses():
+    app.logger.info("API: Fetching all user statuses.")
+    try:
+        statuses = list(user_status_col.find({}))
+        serialized_statuses = {}
+        for status in statuses:
+            serialized_statuses[str(status['user_id'])] = serialize_doc_for_json(status)
+        app.logger.info(f"API Success: Fetched {len(serialized_statuses)} user statuses.")
+        return jsonify(serialized_statuses), 200
+    except Exception as e:
+        app.logger.error(f"API Error: Failed to fetch all user statuses: {e}", exc_info=True)
+        return jsonify({"error": f"Internal Server Error: {e}"}), 500
+
+# --- NEW API ENDPOINT FOR LAST MESSAGES OF ADMIN'S CONVERSATIONS (FOR ADMIN HOME SCREEN) ---
+@app.route('/api/last_messages_for_admin_conversations/<admin_id>', methods=['GET'])
+def get_last_messages_for_admin_conversations(admin_id):
+    app.logger.info(f"API: Fetching last messages for admin's conversations: {admin_id}")
+    try:
+        admin_obj_id = ObjectId(admin_id)
+    except Exception as e:
+        app.logger.error(f"API Error: Invalid admin_id format for last messages: {admin_id}, Error: {e}", exc_info=True)
+        return jsonify({"error": "Invalid admin_id format"}), 400
+
+    pipeline = [
+        # Match rooms where the current admin is a member
+        {"$match": {"members.id": admin_obj_id}},
+        # Lookup messages for these rooms
+        {"$lookup": {
+            "from": "messages",
+            "localField": "_id",
+            "foreignField": "room_id",
+            "as": "room_messages"
+        }},
+        # Unwind messages to work with each message individually (preserve rooms with no messages)
+        {"$unwind": {"path": "$room_messages", "preserveNullAndEmptyArrays": True}},
+        # Sort messages by timestamp descending to get the latest first for each room
+        {"$sort": {"_id": 1, "room_messages.timestamp": -1}}, # Sort by room_id then timestamp
+        # Group by room_id to get the latest message for each room
+        {"$group": {
+            "_id": "$_id", # Room ID
+            "members": {"$first": "$members"}, # Keep members of the room
+            "last_message": {"$first": "$room_messages"} # Get the latest message
+        }},
+        # Project to format the output and find the chat partner (user_id)
+        {"$project": {
+            "_id": 0, # Exclude default _id
+            "room_id": {"$toString": "$_id"},
+            "last_message": "$last_message",
+            "chat_partner_id": {
+                "$arrayElemAt": [
+                    {"$filter": {
+                        "input": "$members",
+                        "as": "member",
+                        "cond": {"$ne": ["$$member.id", admin_obj_id]}
+                    }},
+                    0
+                ]
+            }
+        }},
+        # Final projection to get the desired structure: {chat_partner_id: last_message_data}
+        {"$project": {
+            "chat_partner_id": {"$toString": "$chat_partner_id.id"}, # Convert partner ObjectId to string
+            "last_message": "$last_message"
+        }}
+    ]
+
+    try:
+        results = list(rooms_col.aggregate(pipeline))
+        
+        response_data = {}
+        for res in results:
+            chat_partner_id = res.get('chat_partner_id')
+            last_message_doc = res.get('last_message')
+            if chat_partner_id: # Only add if chat_partner_id is found (should always be for 1-1 chats)
+                response_data[chat_partner_id] = serialize_doc_for_json(last_message_doc)
+        
+        app.logger.info(f"API Success: Fetched last messages for admin {admin_id}. Count: {len(response_data)}")
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        app.logger.error(f"API Error: Failed to fetch last messages for admin {admin_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
 
