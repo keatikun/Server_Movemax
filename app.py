@@ -1,27 +1,32 @@
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from pymongo import MongoClient
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask_cors import CORS
-from config import MONGO_URI, SECRET_KEY # Assuming config.py exists and works
+from config import MONGO_URI, SECRET_KEY 
 from bson.objectid import ObjectId
 import logging
+from collections import deque 
+
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
-CORS(app, resources={r"/*": {"origins": "*"}}) # Allow all origins for development
+CORS(app, resources={r"/*": {"origins": "*"}}) 
 
-# Set logging levels for Flask app, Socket.IO, and Engine.IO to INFO for production.
+# Configure logging for the Flask app
 app.logger.setLevel(logging.INFO) 
-logging.getLogger('socketio').setLevel(logging.INFO)
-logging.getLogger('engineio').setLevel(logging.INFO)
-
 handler = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 app.logger.addHandler(handler)
 
-socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True, async_mode='eventlet') # Added async_mode for better production compatibility
+# Configure logging for Socket.IO and Engine.IO
+logging.getLogger('socketio').setLevel(logging.INFO)
+logging.getLogger('engineio').setLevel(logging.INFO)
+
+
+# Initialize SocketIO with async_mode='eventlet' for better production compatibility
+socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True, async_mode='eventlet')
 
 client = MongoClient(MONGO_URI)
 db = client["Movemax"]
@@ -30,120 +35,103 @@ users_col = db["users"]
 admins_col = db["admins"]
 messages_col = db["messages"]
 rooms_col = db["rooms"]
-reads_col = db["user_room_reads"] # This collection will store is_muted and is_pinned
+reads_col = db["user_room_reads"]
 user_status_col = db["user_status"]
 
 # Global mappings for efficient Socket.IO session management
-# Stores which SIDs belong to a user_id (a user might have multiple connected devices/tabs)
-connected_users_sessions = {} # {user_id: {sid1, sid2, ...}}
-# Stores which user_id corresponds to a SID (for quick lookup on disconnect)
-sid_to_user_id = {} # {sid: user_id}
+connected_users_sessions = {} 
+sid_to_user_id = {} 
 
-# Helper function to convert ObjectId and datetime objects to string for JSON serialization
-# This ensures that PyMongo's BSON types are converted to JSON-compatible strings.
+# --- Spam Prevention Configuration and Data Structures ---
+# Rate Limiting: Max 3 messages every 5 seconds per user
+MESSAGE_RATE_LIMIT_INTERVAL_SECONDS = 5
+MESSAGE_RATE_LIMIT_MAX_MESSAGES = 3
+user_message_timestamps = {} # {user_id: deque([timestamp1, timestamp2, ...])}
+
+# Duplicate Message Prevention: Prevent same message within 2 seconds
+DUPLICATE_MESSAGE_COOLDOWN_SECONDS = 2
+user_last_message_content = {} # {user_id: {'content': 'last_msg', 'timestamp': datetime}}
+
+# Message Length Limit: Max 500 characters
+MESSAGE_MAX_LENGTH = 500
+# --- End Spam Prevention Configuration ---
+
+
 def serialize_doc_for_json(doc):
     if doc is None:
         return None
-    # Create a copy to avoid modifying the original document from PyMongo result
     serialized_doc = doc.copy()
     
-    # Convert _id to string
     if '_id' in serialized_doc and isinstance(serialized_doc['_id'], ObjectId):
         serialized_doc['_id'] = str(serialized_doc['_id'])
     
-    # Handle nested ObjectIds in lists (e.g., 'members' in room document)
     if 'members' in serialized_doc and isinstance(serialized_doc['members'], list):
         for i, member in enumerate(serialized_doc['members']):
             if 'id' in member and isinstance(member['id'], ObjectId):
                 serialized_doc['members'][i]['id'] = str(member['id'])
 
-    # Convert datetime objects to ISO format string (e.g., for 'timestamp', 'created_at', 'updated_at', 'last_active')
     for key, value in serialized_doc.items():
         if isinstance(value, datetime):
-            # Ensure timestamp is in UTC ISO format (e.g., '2023-10-27T10:00:00.000Z')
             serialized_doc[key] = value.replace(tzinfo=timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
-        elif isinstance(value, ObjectId): # Catch any remaining ObjectIds not explicitly handled above
+        elif isinstance(value, ObjectId):
             serialized_doc[key] = str(value)
             
     return serialized_doc
 
 
-# --- MongoDB Indexing ---
-# This function creates necessary indexes on application startup.
-# Indexes are crucial for database query performance, especially with a large number of users/messages.
 def create_mongo_indexes():
     app.logger.info("MongoDB: Checking and creating indexes...")
     try:
-        # Index for faster user lookups by _id and username
         users_col.create_index([("_id", 1)]) 
         users_col.create_index([("username", 1)], unique=True)
 
-        # Index for faster admin lookups
         admins_col.create_index([("_id", 1)])
         admins_col.create_index([("username", 1)], unique=True)
 
-        # Index for fast room lookup by room_key
         rooms_col.create_index([("room_key", 1)], unique=True)
-        # Index for efficient lookup of rooms a user is a member of
         rooms_col.create_index([("members.id", 1)])
         rooms_col.create_index([("updated_at", -1)])
 
-        # Indexes for message history and unread counts
-        messages_col.create_index([("room_id", 1)]) # Efficiently find messages for a room
-        messages_col.create_index([("timestamp", 1)]) # Efficiently sort messages by time
-        messages_col.create_index([("room_id", 1), ("timestamp", 1)]) # Compound index for chat history query
+        messages_col.create_index([("room_id", 1)])
+        messages_col.create_index([("timestamp", 1)])
+        messages_col.create_index([("room_id", 1), ("timestamp", 1)])
+        messages_col.create_index([("room_id", 1), ("sender_id", 1), ("is_read", 1)]) 
 
-        # Indexes for unread reads collection
         reads_col.create_index([("user_id", 1), ("room_id", 1)], unique=True)
         reads_col.create_index([("last_read_timestamp", 1)])
-        # NEW: Indexes for mute and pin status
-        reads_col.create_index([("user_id", 1), ("is_muted", 1)]) 
-        reads_col.create_index([("user_id", 1), ("is_pinned", 1)]) 
+        reads_col.create_index([("user_id", 1), ("is_muted", 1)])
+        reads_col.create_index([("user_id", 1), ("is_pinned", 1)])
 
-        # Index for user status lookups
         user_status_col.create_index([("user_id", 1)], unique=True)
-        user_status_col.create_index([("is_online", 1)]) # For quick lookup of online users
+        user_status_col.create_index([("is_online", 1)])
 
         app.logger.info("MongoDB: All indexes checked/created successfully.")
     except Exception as e:
         app.logger.error(f"MongoDB Error: Failed to create indexes: {e}", exc_info=True)
 
-# Call index creation on application startup
 with app.app_context():
     create_mongo_indexes()
 
 
-# --- Helper function for Optimized Broadcasts of User Status ---
 def _notify_related_users_of_status_change(user_id_str, new_status_doc):
-    """
-    Notifies other users in shared chat rooms about a user's status change.
-    Instead of broadcasting to all connected clients, this function
-    finds users who share at least one chat room with the changing user
-    and emits the status update only to their personal Socket.IO rooms.
-    This significantly reduces server load and network traffic for status updates.
-    """
     try:
         user_obj_id = ObjectId(user_id_str)
         serialized_status = serialize_doc_for_json(new_status_doc)
         
-        # Find all rooms where this user is a member
         rooms_cursor = rooms_col.find({"members.id": user_obj_id})
         
-        notified_users = set() # To track which users have already been notified
-        notified_users.add(user_id_str) # Do not notify the user themselves
+        notified_users = set() 
+        notified_users.add(user_id_str) 
 
         for room_doc in rooms_cursor:
             app.logger.debug(f"Socket: Processing room {room_doc['_id']} for status change of {user_id_str}")
             if 'members' in room_doc:
                 for member in room_doc['members']:
                     member_id_str = str(member['id'])
-                    # If the member is not the current user and hasn't been notified yet
                     if member_id_str != user_id_str and member_id_str not in notified_users:
-                        # Emit status change to the other member's personal Socket.IO room
-                        # Each user client joins their own room (identified by their userId)
                         socketio.emit('user_status_changed', serialized_status, room=member_id_str)
                         app.logger.info(f"Socket: Emitted user_status_changed for {user_id_str} to room {member_id_str}")
-                        notified_users.add(member_id_str) # Mark as notified
+                        notified_users.add(member_id_str)
     except Exception as e:
         app.logger.error(f"Socket Error: Failed to notify related users of status change for {user_id_str}: {e}", exc_info=True)
 
@@ -164,7 +152,6 @@ def get_admins():
     admins = list(admins_col.find({}, {"password": 0}))
     return jsonify([serialize_doc_for_json(a) for a in admins]), 200
 
-# --- API ENDPOINT FOR LAST MESSAGE OF ALL CONVERSATIONS FOR A GIVEN USER (FOR USER HOME SCREEN) ---
 @app.route('/api/last_messages_for_user/<user_id>', methods=['GET'])
 def get_last_messages_for_user(user_id):
     app.logger.info(f"API: Fetching last messages for all rooms of user: {user_id}")
@@ -175,28 +162,22 @@ def get_last_messages_for_user(user_id):
         return jsonify({"error": "Invalid user_id format"}), 400
 
     pipeline = [
-        # Match rooms where the current user is a member
         {"$match": {"members.id": user_obj_id}},
-        # Lookup messages for these rooms
         {"$lookup": {
             "from": "messages",
             "localField": "_id",
             "foreignField": "room_id",
             "as": "room_messages"
         }},
-        # Unwind messages to work with each message individually
         {"$unwind": {"path": "$room_messages", "preserveNullAndEmptyArrays": True}},
-        # Sort messages by timestamp descending to get the latest first
-        {"$sort": {"_id": 1, "room_messages.timestamp": -1}}, # Sort by room_id then timestamp
-        # Group by room_id to get the latest message for each room
+        {"$sort": {"_id": 1, "room_messages.timestamp": -1}},
         {"$group": {
-            "_id": "$_id", # Room ID
-            "members": {"$first": "$members"}, # Keep members of the room
-            "last_message": {"$first": "$room_messages"} # Get the latest message
+            "_id": "$_id",
+            "members": {"$first": "$members"},
+            "last_message": {"$first": "$room_messages"}
         }},
-        # Project to format the output and find the chat partner
         {"$project": {
-            "_id": 0, # Exclude default _id
+            "_id": 0,
             "room_id": {"$toString": "$_id"},
             "last_message": "$last_message",
             "chat_partner_id": {
@@ -210,9 +191,8 @@ def get_last_messages_for_user(user_id):
                 ]
             }
         }},
-        # Final projection to get the desired structure: {chat_partner_id: last_message}
         {"$project": {
-            "chat_partner_id": {"$toString": "$chat_partner_id.id"}, # Convert partner ObjectId to string
+            "chat_partner_id": {"$toString": "$chat_partner_id.id"},
             "last_message": "$last_message"
         }}
     ]
@@ -220,12 +200,11 @@ def get_last_messages_for_user(user_id):
     try:
         results = list(rooms_col.aggregate(pipeline))
         
-        # Format the results into a dictionary {chat_partner_id: last_message_data}
         response_data = {}
         for res in results:
             chat_partner_id = res.get('chat_partner_id')
             last_message_doc = res.get('last_message')
-            if chat_partner_id: # Only add if chat_partner_id is found (should always be for 1-1 chats)
+            if chat_partner_id: 
                 response_data[chat_partner_id] = serialize_doc_for_json(last_message_doc)
         
         app.logger.info(f"API Success: Fetched last messages for user {user_id}. Count: {len(response_data)}")
@@ -235,7 +214,6 @@ def get_last_messages_for_user(user_id):
         app.logger.error(f"API Error: Failed to fetch last messages for user {user_id}: {e}", exc_info=True)
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
-# --- API ENDPOINT FOR ALL USER STATUSES (FOR ADMIN HOME SCREEN & USER HOME SCREEN) ---
 @app.route('/api/all_user_statuses', methods=['GET'])
 def get_all_user_statuses():
     app.logger.info("API: Fetching all user statuses.")
@@ -250,7 +228,6 @@ def get_all_user_statuses():
         app.logger.error(f"API Error: Failed to fetch all user statuses: {e}", exc_info=True)
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
-# --- API ENDPOINT FOR LAST MESSAGES OF ADMIN'S CONVERSATIONS (FOR ADMIN HOME SCREEN) ---
 @app.route('/api/last_messages_for_admin_conversations/<admin_id>', methods=['GET'])
 def get_last_messages_for_admin_conversations(admin_id):
     app.logger.info(f"API: Fetching last messages for admin's conversations: {admin_id}")
@@ -261,28 +238,22 @@ def get_last_messages_for_admin_conversations(admin_id):
         return jsonify({"error": "Invalid admin_id format"}), 400
 
     pipeline = [
-        # Match rooms where the current admin is a member
         {"$match": {"members.id": admin_obj_id}},
-        # Lookup messages for these rooms
         {"$lookup": {
             "from": "messages",
             "localField": "_id",
             "foreignField": "room_id",
             "as": "room_messages"
         }},
-        # Unwind messages to work with each message individually (preserve rooms with no messages)
         {"$unwind": {"path": "$room_messages", "preserveNullAndEmptyArrays": True}},
-        # Sort messages by timestamp descending to get the latest first for each room
-        {"$sort": {"_id": 1, "room_messages.timestamp": -1}}, # Sort by room_id then timestamp
-        # Group by room_id to get the latest message for each room
+        {"$sort": {"_id": 1, "room_messages.timestamp": -1}},
         {"$group": {
-            "_id": "$_id", # Room ID
-            "members": {"$first": "$members"}, # Keep members of the room
-            "last_message": {"$first": "$room_messages"} # Get the latest message
+            "_id": "$_id",
+            "members": {"$first": "$members"},
+            "last_message": {"$first": "$room_messages"}
         }},
-        # Project to format the output and find the chat partner (user_id)
         {"$project": {
-            "_id": 0, # Exclude default _id
+            "_id": 0,
             "room_id": {"$toString": "$_id"},
             "last_message": "$last_message",
             "chat_partner_id": {
@@ -296,9 +267,8 @@ def get_last_messages_for_admin_conversations(admin_id):
                 ]
             }
         }},
-        # Final projection to get the desired structure: {chat_partner_id: last_message_data}
         {"$project": {
-            "chat_partner_id": {"$toString": "$chat_partner_id.id"}, # Convert partner ObjectId to string
+            "chat_partner_id": {"$toString": "$chat_partner_id.id"},
             "last_message": "$last_message"
         }}
     ]
@@ -310,7 +280,7 @@ def get_last_messages_for_admin_conversations(admin_id):
         for res in results:
             chat_partner_id = res.get('chat_partner_id')
             last_message_doc = res.get('last_message')
-            if chat_partner_id: # Only add if chat_partner_id is found (should always be for 1-1 chats)
+            if chat_partner_id: 
                 response_data[chat_partner_id] = serialize_doc_for_json(last_message_doc)
         
         app.logger.info(f"API Success: Fetched last messages for admin {admin_id}. Count: {len(response_data)}")
@@ -321,7 +291,6 @@ def get_last_messages_for_admin_conversations(admin_id):
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
 
-# --- API ENDPOINT FOR USER ROOM MAPPINGS (FOR FASTER ROOM ID RETRIEVAL) ---
 @app.route('/api/user_room_mappings/<user_id>', methods=['GET'])
 def get_user_room_mappings(user_id):
     app.logger.info(f"API: Fetching room mappings for user: {user_id}")
@@ -375,9 +344,8 @@ def get_unread_counts(user_id):
         app.logger.error(f"API Error: Invalid user_id format for unread counts: {user_id}, Error: {e}", exc_info=True)
         return jsonify({"error": "Invalid user_id format"}), 400
 
-    unread_counts_and_settings = {} # Changed variable name for clarity
+    unread_counts_and_settings = {} 
     
-    # Using MongoDB Aggregation Pipeline for efficient unread count and settings calculation
     pipeline = [
         {"$match": {"user_id": user_obj_id}},
         {"$lookup": {
@@ -406,17 +374,16 @@ def get_unread_counts(user_id):
         {"$unwind": {"path": "$unread_messages_count_result", "preserveNullAndEmptyArrays": True}},
         {"$project": {
             "_id": 0,
-            "room_id": {"$toString": "$room_info._id"}, # Use room_info._id to map back to the room's actual ID
+            "room_id": {"$toString": "$room_info._id"},
             "unread_count": {"$ifNull": ["$unread_messages_count_result.unreadMessages", 0]},
-            "is_muted": {"$ifNull": ["$is_muted", False]}, # Include is_muted status
-            "is_pinned": {"$ifNull": ["$is_pinned", False]} # Include is_pinned status
+            "is_muted": {"$ifNull": ["$is_muted", False]}, 
+            "is_pinned": {"$ifNull": ["$is_pinned", False]} 
         }}
     ]
 
     try:
         results = list(reads_col.aggregate(pipeline))
         for res in results:
-            # Store unread count, is_muted, is_pinned by room_id
             room_id = res["room_id"]
             unread_counts_and_settings[room_id] = {
                 "unread_count": res["unread_count"],
@@ -424,20 +391,17 @@ def get_unread_counts(user_id):
                 "is_pinned": res["is_pinned"]
             }
         
-        # Also include rooms where the user is a member but has no read record yet
-        # For these rooms, all messages are considered unread if no read record exists
-        # And default mute/pin status to False
         user_rooms_not_in_reads = rooms_col.find({
             "members.id": user_obj_id,
-            "_id": {"$nin": [ObjectId(rid) for rid in unread_counts_and_settings.keys()]} # Exclude rooms already counted
+            "_id": {"$nin": [ObjectId(rid) for rid in unread_counts_and_settings.keys()]} 
         })
         for room in user_rooms_not_in_reads:
             total_messages_in_room = messages_col.count_documents({"room_id": room["_id"]})
             room_id_str = str(room["_id"])
             unread_counts_and_settings[room_id_str] = {
                 "unread_count": total_messages_in_room,
-                "is_muted": False, # Default to not muted
-                "is_pinned": False # Default to not pinned
+                "is_muted": False, 
+                "is_pinned": False 
             }
 
         app.logger.info(f"API Success: Fetched unread counts and chat settings for user {user_id}: {unread_counts_and_settings}")
@@ -523,7 +487,37 @@ def get_chat_history(room_id):
         return jsonify({"error": "Invalid room_id format"}), 400
 
     try:
-        messages = list(messages_col.find({"room_id": room_obj_id}).sort("timestamp", 1))
+        # Fetch messages and include sender's profile image URL
+        pipeline = [
+            {"$match": {"room_id": room_obj_id}},
+            {"$sort": {"timestamp": 1}},
+            {"$lookup": {
+                "from": "users", # Assuming users collection for profile images
+                "localField": "sender_id",
+                "foreignField": "_id",
+                "as": "sender_user_info"
+            }},
+            {"$lookup": {
+                "from": "admins", # Assuming admins collection for profile images
+                "localField": "sender_id",
+                "foreignField": "_id",
+                "as": "sender_admin_info"
+            }},
+            {"$addFields": {
+                "sender_profile_image_url": {
+                    "$cond": {
+                        "if": {"$ne": [{"$size": "$sender_user_info"}, 0]},
+                        "then": {"$arrayElemAt": ["$sender_user_info.profile_image_url", 0]},
+                        "else": {"$arrayElemAt": ["$sender_admin_info.profile_image_url", 0]}
+                    }
+                }
+            }},
+            {"$project": {
+                "sender_user_info": 0,
+                "sender_admin_info": 0
+            }}
+        ]
+        messages = list(messages_col.aggregate(pipeline))
         serialized_messages = [serialize_doc_for_json(msg) for msg in messages]
         
         app.logger.info(f"API Success: Fetched {len(serialized_messages)} messages for room {room_id}.")
@@ -545,18 +539,71 @@ def mark_as_read():
         return jsonify({"error": "Invalid IDs"}), 400
 
     try:
+        # Get the current last_read_timestamp for the user in this room
+        read_status_doc = reads_col.find_one({"user_id": user_id, "room_id": room_id})
+        last_read_timestamp = read_status_doc.get("last_read_timestamp", datetime.min.replace(tzinfo=timezone.utc)) if read_status_doc else datetime.min.replace(tzinfo=timezone.utc)
+
+        # Find the other member in the room to know whose messages to mark as read
+        room_doc = rooms_col.find_one({"_id": room_id})
+        if room_doc:
+            other_member_id = None
+            for member in room_doc['members']:
+                if member['id'] != user_id: # This is the other person in the 1-on-1 chat
+                    other_member_id = member['id']
+                    break
+            
+            if other_member_id:
+                app.logger.info(f"API: Marking messages from {other_member_id} in room {room_id} as read by {user_id}.")
+                # Update messages in this room sent by the OTHER member to 'is_read: True'
+                # Only mark messages sent AFTER the last_read_timestamp of the current user
+                # and are currently not read.
+                update_result = messages_col.update_many(
+                    {
+                        "room_id": room_id,
+                        "sender_id": other_member_id,
+                        "is_read": False, # Only update if not already read
+                        "timestamp": {"$gt": last_read_timestamp} # Only mark messages sent after user's last read
+                    },
+                    {"$set": {"is_read": True}}
+                )
+                app.logger.info(f"API: Marked {update_result.modified_count} messages as read.")
+
+                # Emit message_read event to the sender of the messages that were just read
+                if update_result.modified_count > 0:
+                    # Fetch IDs of messages that were just marked as read to send to the client
+                    read_message_ids = [str(msg['_id']) for msg in messages_col.find({
+                        "room_id": room_id,
+                        "sender_id": other_member_id,
+                        "is_read": True,
+                        "timestamp": {"$gt": last_read_timestamp} # Ensure we only pick the ones just read
+                    }, {"_id": 1})] 
+                    
+                    # Check if the other_member is connected via Socket.IO
+                    if other_member_id in connected_users_sessions:
+                        app.logger.info(f"Socket: Emitting 'messages_read' to {other_member_id} for room {room_id} and messages {read_message_ids}")
+                        socketio.emit('messages_read', {
+                            'room_id': str(room_id),
+                            'reader_id': str(user_id), # The ID of the user who just read the messages
+                            'message_ids': read_message_ids
+                        }, room=str(other_member_id)) # Emit to the sender's personal room
+            else:
+                app.logger.warning(f"API Warning: Could not find other member in room {room_id} for read receipt.")
+        else:
+            app.logger.warning(f"API Warning: Room {room_id} not found when trying to mark messages as read.")
+
+
+        # Update the user's last_read_timestamp in the reads_col
         reads_col.update_one(
             {"user_id": user_id, "room_id": room_id},
             {"$set": {"last_read_timestamp": datetime.now(timezone.utc), "unread_count": 0}},
             upsert=True
         )
-        app.logger.info(f"API Success: User {user_id} marked room {room_id} as read.")
+        app.logger.info(f"API Success: User {user_id} marked room {room_id} as read and updated messages.")
         return jsonify({"status": "read"}), 200
     except Exception as e:
         app.logger.error(f"API Error: Error marking messages as read: {e}", exc_info=True)
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
-# --- NEW API ENDPOINT: Toggle Mute Status ---
 @app.route('/api/toggle_mute', methods=['POST'])
 def toggle_mute():
     app.logger.info("API: Toggling mute status.")
@@ -564,13 +611,12 @@ def toggle_mute():
     try:
         user_id = ObjectId(data["user_id"])
         room_id = ObjectId(data["room_id"])
-        is_muted = bool(data["is_muted"]) # Expected boolean value
+        is_muted = bool(data["is_muted"]) 
     except Exception as e:
         app.logger.error(f"API Error: Invalid data for toggle_mute: {data}, Error: {e}", exc_info=True)
         return jsonify({"error": "Invalid data"}), 400
 
     try:
-        # Update or insert the mute status for this user in this room
         reads_col.update_one(
             {"user_id": user_id, "room_id": room_id},
             {"$set": {"is_muted": is_muted}},
@@ -582,7 +628,6 @@ def toggle_mute():
         app.logger.error(f"API Error: Error toggling mute status: {e}", exc_info=True)
         return jsonify({"error": f"Internal Server Error: {e}"}), 500
 
-# --- NEW API ENDPOINT: Toggle Pin Status ---
 @app.route('/api/toggle_pin', methods=['POST'])
 def toggle_pin():
     app.logger.info("API: Toggling pin status.")
@@ -590,13 +635,12 @@ def toggle_pin():
     try:
         user_id = ObjectId(data["user_id"])
         room_id = ObjectId(data["room_id"])
-        is_pinned = bool(data["is_pinned"]) # Expected boolean value
+        is_pinned = bool(data["is_pinned"]) 
     except Exception as e:
         app.logger.error(f"API Error: Invalid data for toggle_pin: {data}, Error: {e}", exc_info=True)
         return jsonify({"error": "Invalid data"}), 400
 
     try:
-        # Update or insert the pin status for this user in this room
         reads_col.update_one(
             {"user_id": user_id, "room_id": room_id},
             {"$set": {"is_pinned": is_pinned}},
@@ -611,7 +655,7 @@ def toggle_pin():
 
 # Socket.IO event handlers
 @socketio.on('connect')
-def handle_connect(*args, **kwargs): # FIX: Accept any arguments passed by Flask-SocketIO
+def handle_connect(*args, **kwargs):
     app.logger.info(f"Socket: Client connected: {request.sid}")
 
 @socketio.on('disconnect')
@@ -621,13 +665,10 @@ def on_disconnect():
 
     user_id_str = sid_to_user_id.get(sid)
     if user_id_str:
-        # Remove SID from the user's connected sessions set
         connected_users_sessions.get(user_id_str, set()).discard(sid)
-        # Remove SID from the global SID to user_id mapping
         if sid in sid_to_user_id:
             del sid_to_user_id[sid]
 
-        # If no more active sessions for this user, mark them as offline
         if not connected_users_sessions.get(user_id_str):
             try:
                 user_obj_id = ObjectId(user_id_str)
@@ -639,9 +680,7 @@ def on_disconnect():
                 
                 updated_status = user_status_col.find_one({"user_id": user_obj_id})
                 if updated_status:
-                    # --- Optimized: Call helper to notify only related users instead of broadcasting to all ---
                     _notify_related_users_of_status_change(user_id_str, updated_status)
-                    # --- End Optimized ---
             except Exception as e:
                 app.logger.error(f"Socket Error: Error updating user status on disconnect or notifying: {e}", exc_info=True)
     else:
@@ -652,12 +691,9 @@ def on_disconnect():
 def join_user_room(data):
     user_id_str = data.get('userId')
     if user_id_str:
-        # Each client joins a unique room identified by their user_id.
-        # This allows targeted emissions to specific users (e.g., status updates).
         join_room(user_id_str)
         app.logger.info(f"Socket: User {user_id_str} joined their personal Socket.IO room.")
         
-        # Track connected SIDs for each user
         connected_users_sessions.setdefault(user_id_str, set()).add(request.sid)
         sid_to_user_id[request.sid] = user_id_str
 
@@ -671,9 +707,7 @@ def join_user_room(data):
             
             updated_status = user_status_col.find_one({"user_id": user_obj_id})
             if updated_status:
-                # --- Optimized: Call helper to notify only related users instead of broadcasting to all ---
                 _notify_related_users_of_status_change(user_id_str, updated_status)
-                # --- End Optimized ---
             
         except Exception as e:
             app.logger.error(f"Socket Error: Error updating user status on connect or notifying: {e}", exc_info=True)
@@ -686,10 +720,51 @@ def on_send_message(data):
     sender_type = data.get("sender_type")
     message_content = data.get("message")
     message_type = data.get("type", "text")
+    temp_id = data.get("temp_id") # New: Get the temporary ID from the client
 
     if not all([room_id_str, sender_id_str, message_content, sender_type]):
         app.logger.error("Socket Error: Missing data for send_message")
         return
+
+    current_time = datetime.now(timezone.utc)
+
+    # --- Spam Prevention Checks ---
+    # 1. Message Length Limit
+    if len(message_content) > MESSAGE_MAX_LENGTH:
+        app.logger.warning(f"Spam Prevention: Message from {sender_id_str} blocked due to excessive length ({len(message_content)} > {MESSAGE_MAX_LENGTH}).")
+        emit('message_blocked', {'reason': 'Message too long'}, room=request.sid)
+        return
+
+    # 2. Duplicate Message Prevention
+    last_msg_info = user_last_message_content.get(sender_id_str)
+    if last_msg_info:
+        last_content = last_msg_info['content']
+        last_timestamp = last_msg_info['timestamp']
+        if last_content == message_content and \
+           (current_time - last_timestamp).total_seconds() < DUPLICATE_MESSAGE_COOLDOWN_SECONDS:
+            app.logger.warning(f"Spam Prevention: Message from {sender_id_str} blocked due to being a duplicate within {DUPLICATE_MESSAGE_COOLDOWN_SECONDS} seconds.")
+            emit('message_blocked', {'reason': 'Duplicate message too soon'}, room=request.sid)
+            return
+    user_last_message_content[sender_id_str] = {'content': message_content, 'timestamp': current_time}
+
+    # 3. Rate Limiting
+    if sender_id_str not in user_message_timestamps:
+        user_message_timestamps[sender_id_str] = deque()
+    
+    # Remove timestamps older than the interval
+    while user_message_timestamps[sender_id_str] and \
+          (current_time - user_message_timestamps[sender_id_str][0]).total_seconds() > MESSAGE_RATE_LIMIT_INTERVAL_SECONDS:
+        user_message_timestamps[sender_id_str].popleft()
+
+    # Check if adding the current message exceeds the limit
+    if len(user_message_timestamps[sender_id_str]) >= MESSAGE_RATE_LIMIT_MAX_MESSAGES:
+        app.logger.warning(f"Spam Prevention: Message from {sender_id_str} blocked due to rate limit ({MESSAGE_RATE_LIMIT_MAX_MESSAGES} messages in {MESSAGE_RATE_LIMIT_INTERVAL_SECONDS} seconds).")
+        emit('message_blocked', {'reason': 'Rate limit exceeded'}, room=request.sid)
+        return
+    
+    # Add current message timestamp
+    user_message_timestamps[sender_id_str].append(current_time)
+    # --- End Spam Prevention Checks ---
 
     try:
         room_obj_id = ObjectId(room_id_str)
@@ -704,44 +779,43 @@ def on_send_message(data):
         "sender_type": sender_type,
         "message": message_content,
         "type": message_type,
-        "timestamp": datetime.now(timezone.utc)
+        "timestamp": datetime.now(timezone.utc),
+        "is_read": False # Initialize is_read to False
     }
     
     try:
-        # Insert message into MongoDB
         result = messages_col.insert_one(new_message)
-        inserted_message = messages_col.find_one({"_id": result.inserted_id})
+        inserted_message_doc = messages_col.find_one({"_id": result.inserted_id})
         
-        # Update room's last updated timestamp
         rooms_col.update_one(
             {"_id": room_obj_id},
             {"$set": {"updated_at": datetime.now(timezone.utc)}}
         )
 
-        serialized_msg = serialize_doc_for_json(inserted_message)
-        
-        # Retrieve room members to send targeted messages
+        # Include the original temp_id in the serialized message if it exists
+        serialized_msg = serialize_doc_for_json(inserted_message_doc)
+        if temp_id:
+            serialized_msg['_id'] = temp_id # Replace the actual _id with temp_id for client-side matching
+
         room_doc = rooms_col.find_one({"_id": room_obj_id})
         if room_doc and 'members' in room_doc:
             for member in room_doc['members']:
                 member_id_obj = member['id']
                 member_id_str = str(member_id_obj)
 
-                # Emit 'receive_message' to all members of the room
-                # Each client listens to their own user_id room, so we emit to that room.
+                # Emit 'receive_message' to all members of the room (including sender)
+                # This ensures everyone gets the message, and the sender can update their optimistic message
                 socketio.emit('receive_message', serialized_msg, room=member_id_str)
                 app.logger.info(f"Socket: Emitted 'receive_message' for msg {serialized_msg['_id']} to room {member_id_str}")
 
-                # If the recipient is not the sender, also send 'new_message' for unread notification
-                if member_id_str != sender_id_str:
-                    # Check if the recipient has muted this chat
+                # Emit 'new_message' specifically for unread count increment for the recipient
+                if member_id_str != sender_id_str: # Only for the recipient, not the sender
                     read_status = reads_col.find_one({"user_id": member_id_obj, "room_id": room_obj_id})
                     is_muted_for_recipient = read_status.get('is_muted', False) if read_status else False
 
                     if not is_muted_for_recipient:
                         socketio.emit('new_message', serialized_msg, room=member_id_str)
                         app.logger.info(f"Socket: Emitted 'new_message' for msg {serialized_msg['_id']} to room {member_id_str} (unread for {member_id_str})")
-                        # Increment unread count for the recipient
                         reads_col.update_one(
                             {"user_id": member_id_obj, "room_id": room_obj_id},
                             {"$inc": {"unread_count": 1}},
@@ -759,7 +833,6 @@ def on_send_message(data):
 
 @socketio.on('typing')
 def on_typing(data):
-    # This event is already optimized as it emits to specific room members.
     room_id_str = data.get("room_id")
     user_id_str = data.get("user_id")
     if room_id_str and user_id_str:
@@ -769,7 +842,6 @@ def on_typing(data):
             if room_doc and 'members' in room_doc:
                 for member in room_doc['members']:
                     member_id_str = str(member['id'])
-                    # Send typing event only to the OTHER member in the room
                     if member_id_str != user_id_str:
                         emit('typing', {'user_id': user_id_str}, room=member_id_str)
                         app.logger.info(f"Socket: Typing event from {user_id_str} to {member_id_str} in room {room_id_str}")
@@ -779,7 +851,6 @@ def on_typing(data):
 
 @socketio.on('stop_typing')
 def on_stop_typing(data):
-    # This event is already optimized as it emits to specific room members.
     room_id_str = data.get("room_id")
     user_id_str = data.get("user_id")
     if room_id_str and user_id_str:
@@ -789,7 +860,6 @@ def on_stop_typing(data):
             if room_doc and 'members' in room_doc:
                 for member in room_doc['members']:
                     member_id_str = str(member['id'])
-                    # Send stop_typing event only to the OTHER member in the room
                     if member_id_str != user_id_str:
                         emit('stop_typing', {'user_id': user_id_str}, room=member_id_str)
                         app.logger.info(f"Socket: Stop Typing event from {user_id_str} to {member_id_str} in room {room_id_str}")
@@ -801,7 +871,5 @@ if __name__ == '__main__':
     import eventlet
     import eventlet.wsgi
     app.logger.info("Starting production server on http://0.0.0.0:8080")
-    # For production, it's highly recommended to use a WSGI server like Gunicorn.
-    # Example Gunicorn command: gunicorn -k eventlet -w 1 "app:socketio" --bind 0.0.0.0:8080
     socketio.run(app, host='0.0.0.0', port=8080)
 
