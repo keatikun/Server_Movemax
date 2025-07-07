@@ -534,6 +534,7 @@ def mark_as_read():
     try:
         user_id = ObjectId(data["user_id"])
         room_id = ObjectId(data["room_id"])
+        app.logger.debug(f"API: mark_as_read request received for user_id: {user_id}, room_id: {room_id}")
     except Exception as e:
         app.logger.error(f"API Error: Invalid IDs for mark_read: {data}, Error: {e}", exc_info=True)
         return jsonify({"error": "Invalid IDs"}), 400
@@ -542,6 +543,7 @@ def mark_as_read():
         # Get the current last_read_timestamp for the user in this room
         read_status_doc = reads_col.find_one({"user_id": user_id, "room_id": room_id})
         last_read_timestamp = read_status_doc.get("last_read_timestamp", datetime.min.replace(tzinfo=timezone.utc)) if read_status_doc else datetime.min.replace(tzinfo=timezone.utc)
+        app.logger.debug(f"API: Current last_read_timestamp for user {user_id} in room {room_id}: {last_read_timestamp}")
 
         # Find the other member in the room to know whose messages to mark as read
         room_doc = rooms_col.find_one({"_id": room_id})
@@ -566,7 +568,7 @@ def mark_as_read():
                     },
                     {"$set": {"is_read": True}}
                 )
-                app.logger.info(f"API: Marked {update_result.modified_count} messages as read.")
+                app.logger.info(f"API: Marked {update_result.modified_count} messages as read for room {room_id}.")
 
                 # Emit message_read event to the sender of the messages that were just read
                 if update_result.modified_count > 0:
@@ -579,13 +581,15 @@ def mark_as_read():
                     }, {"_id": 1})] 
                     
                     # Check if the other_member is connected via Socket.IO
-                    if other_member_id in connected_users_sessions:
-                        app.logger.info(f"Socket: Emitting 'messages_read' to {other_member_id} for room {room_id} and messages {read_message_ids}")
+                    if str(other_member_id) in connected_users_sessions: # Ensure other_member_id is string for lookup
+                        app.logger.info(f"Socket: Emitting 'messages_read' to {other_member_id} (sender) for room {room_id} and messages {read_message_ids}")
                         socketio.emit('messages_read', {
                             'room_id': str(room_id),
                             'reader_id': str(user_id), # The ID of the user who just read the messages
                             'message_ids': read_message_ids
                         }, room=str(other_member_id)) # Emit to the sender's personal room
+                    else:
+                        app.logger.info(f"Socket: Sender {other_member_id} is not currently connected. Not emitting messages_read event.")
             else:
                 app.logger.warning(f"API Warning: Could not find other member in room {room_id} for read receipt.")
         else:
@@ -816,7 +820,6 @@ def on_send_message(data):
                 member_id_obj = member['id']
                 member_id_str = str(member_id_obj)
 
-                # --- START OF CRITICAL CHANGE FOR REAL-TIME DISPLAY ---
                 # Prepare message data for this specific member
                 message_to_emit = serialized_message_for_all.copy()
 
@@ -836,12 +839,12 @@ def on_send_message(data):
                     read_status = reads_col.find_one({"user_id": member_id_obj, "room_id": room_obj_id})
                     is_muted_for_recipient = read_status.get('is_muted', False) if read_status else False
 
+                    # Always emit 'receive_message' to the recipient for real-time display
+                    app.logger.info(f"Socket: Emitting 'receive_message' to recipient room {member_id_str} for message {message_to_emit['_id']}")
+                    socketio.emit('receive_message', message_to_emit, room=member_id_str)
+                    
                     if not is_muted_for_recipient:
-                        # Emit 'receive_message' to the recipient as well
-                        app.logger.info(f"Socket: Emitting 'receive_message' to recipient room {member_id_str} for message {message_to_emit['_id']}")
-                        socketio.emit('receive_message', message_to_emit, room=member_id_str)
-                        
-                        # Also emit 'new_message' for unread count increment for the recipient's chat list
+                        # Emit 'new_message' for unread count increment for the recipient's chat list
                         app.logger.info(f"Socket: Emitting 'new_message' for room {room_id_str} to recipient {member_id_str} for unread count update.")
                         socketio.emit('new_message', {'room_id': room_id_str, 'sender_id': sender_id_str}, room=member_id_str)
                         
@@ -852,8 +855,7 @@ def on_send_message(data):
                         )
                         app.logger.info(f"Socket: Incremented unread count for user {member_id_str} in room {room_id_str}")
                     else:
-                        app.logger.info(f"Socket: New message for user {member_id_str} in room {room_id_str} but chat is muted. Not emitting 'receive_message' or incrementing unread count.")
-                # --- END OF CRITICAL CHANGE FOR REAL-TIME DISPLAY ---
+                        app.logger.info(f"Socket: New message for user {member_id_str} in room {room_id_str} but chat is muted. Not incrementing unread count.")
         else:
             app.logger.warning(f"Socket Warning: Room {room_id_str} not found or no members for message broadcast.")
 
@@ -861,6 +863,46 @@ def on_send_message(data):
         app.logger.error(f"Socket Error: Error sending message or broadcasting: {e}", exc_info=True)
         # Emit an error back to the sender if message sending failed
         emit('message_error', {'temp_id': client_temp_id, 'error': str(e)}, room=request.sid) 
+
+@socketio.on('typing')
+def on_typing(data):
+    app.logger.info(f"Socket: Received typing event from client: {data}")
+    room_id_str = data.get("room_id")
+    user_id_str = data.get("user_id")
+    if room_id_str and user_id_str:
+        try:
+            room_obj_id = ObjectId(room_id_str)
+            room_doc = rooms_col.find_one({"_id": room_obj_id})
+            if room_doc and 'members' in room_doc:
+                for member in room_doc['members']:
+                    member_id_str = str(member['id'])
+                    if member_id_str != user_id_str: # Emit to the other member
+                        emit('typing', {'user_id': user_id_str}, room=member_id_str) # Emits to the personal room of the other member
+                        app.logger.info(f"Socket: Re-emitted typing event from {user_id_str} to {member_id_str} in room {room_id_str}")
+            else:
+                app.logger.warning(f"Socket Warning: Room {room_id_str} not found or no members for typing event from {user_id_str}.")
+        except Exception as e:
+            app.logger.error(f"Socket Error: Error handling typing event: {e}", exc_info=True)
+
+@socketio.on('stop_typing')
+def on_stop_typing(data):
+    app.logger.info(f"Socket: Received stop_typing event from client: {data}")
+    room_id_str = data.get("room_id")
+    user_id_str = data.get("user_id")
+    if room_id_str and user_id_str:
+        try:
+            room_obj_id = ObjectId(room_id_str)
+            room_doc = rooms_col.find_one({"_id": room_obj_id})
+            if room_doc and 'members' in room_doc:
+                for member in room_doc['members']:
+                    member_id_str = str(member['id'])
+                    if member_id_str != user_id_str: # Emit to the other member
+                        emit('stop_typing', {'user_id': user_id_str}, room=member_id_str) # Emits to the personal room of the other member
+                        app.logger.info(f"Socket: Re-emitted stop_typing event from {user_id_str} to {member_id_str} in room {room_id_str}")
+            else:
+                app.logger.warning(f"Socket Warning: Room {room_id_str} not found or no members for stop_typing event from {user_id_str}.")
+        except Exception as e:
+            app.logger.error(f"Socket Error: Error handling stop_typing event: {e}", exc_info=True)
 
 if __name__ == '__main__':
     import eventlet
