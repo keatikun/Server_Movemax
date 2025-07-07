@@ -791,15 +791,17 @@ def on_send_message(data):
 
 
         result = messages_col.insert_one(new_message)
-        # --- START OF CRITICAL CHANGES ---
-        # Update the new_message dictionary with the actual MongoDB _id
+        
+        # --- START OF MODIFIED/ADDED LINES FOR REAL-TIME READ RECEIPTS ---
+        # 1. Update the new_message dictionary with the actual MongoDB _id
         new_message['_id'] = result.inserted_id 
         app.logger.info(f"Socket: Message inserted with actual MongoDB ID: {new_message['_id']}")
 
-        # Serialize the message for JSON response
+        # 2. Serialize the message for JSON response (this copy will be sent to the sender)
         serialized_message_for_sender = serialize_doc_for_json(new_message)
 
         # Add the temporary ID back to the serialized message for the sender ONLY
+        # This allows the sender's client to match the optimistic message with the server's confirmed message
         if temp_id:
             serialized_message_for_sender['temp_id'] = temp_id 
             app.logger.info(f"Socket: Added temp_id {temp_id} to serialized message for sender.")
@@ -807,16 +809,16 @@ def on_send_message(data):
         app.logger.info(f"Socket: Emitting receive_message to sender {request.sid} with data: {serialized_message_for_sender}")
         emit('receive_message', serialized_message_for_sender, room=request.sid)
 
-        # For other members in the room, emit 'new_message'
-        # They don't need temp_id, so create a copy and remove it if present
-        serialized_message_for_others = serialize_doc_for_json(new_message) # Re-serialize to ensure no temp_id is carried over
-        if 'temp_id' in serialized_message_for_others: # This check might be redundant if serialize_doc_for_json doesn't include it, but good for safety
+        # 3. For other members in the room, emit 'new_message'
+        # They don't need temp_id, so create a fresh copy and ensure temp_id is not present
+        serialized_message_for_others = serialize_doc_for_json(new_message) 
+        if 'temp_id' in serialized_message_for_others: 
             del serialized_message_for_others['temp_id'] 
             app.logger.info("Socket: Removed temp_id from message for other recipients.")
 
         app.logger.info(f"Socket: Emitting new_message to room {room_id_str} (excluding sender) with data: {serialized_message_for_others}")
         socketio.emit('new_message', serialized_message_for_others, room=room_id_str, skip_sid=request.sid)
-        # --- END OF CRITICAL CHANGES ---
+        # --- END OF MODIFIED/ADDED LINES FOR REAL-TIME READ RECEIPTS ---
 
     except Exception as e:
         app.logger.error(f"Socket Error: Failed to send message: {e}", exc_info=True)
