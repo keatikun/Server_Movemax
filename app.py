@@ -8,7 +8,6 @@ from bson.objectid import ObjectId
 import logging
 from collections import deque 
 
-
 app = Flask(__name__)
 app.config['SECRET_KEY'] = SECRET_KEY
 CORS(app, resources={r"/*": {"origins": "*"}}) 
@@ -720,7 +719,7 @@ def on_send_message(data):
     sender_type = data.get("sender_type")
     message_content = data.get("message")
     message_type = data.get("type", "text")
-    temp_id = data.get("temp_id") # New: Get the temporary ID from the client
+    temp_id = data.get("temp_id") # Get the temporary ID from the client
 
     if not all([room_id_str, sender_id_str, message_content, sender_type]):
         app.logger.error("Socket Error: Missing data for send_message")
@@ -758,118 +757,74 @@ def on_send_message(data):
 
     # Check if adding the current message exceeds the limit
     if len(user_message_timestamps[sender_id_str]) >= MESSAGE_RATE_LIMIT_MAX_MESSAGES:
-        app.logger.warning(f"Spam Prevention: Message from {sender_id_str} blocked due to rate limit ({MESSAGE_RATE_LIMIT_MAX_MESSAGES} messages in {MESSAGE_RATE_LIMIT_INTERVAL_SECONDS} seconds).")
+        app.logger.warning(f"Spam Prevention: Message from {sender_id_str} blocked due to rate limit ({len(user_message_timestamps[sender_id_str])} messages in {MESSAGE_RATE_LIMIT_INTERVAL_SECONDS}s).")
         emit('message_blocked', {'reason': 'Rate limit exceeded'}, room=request.sid)
         return
-    
-    # Add current message timestamp
     user_message_timestamps[sender_id_str].append(current_time)
     # --- End Spam Prevention Checks ---
 
     try:
-        room_obj_id = ObjectId(room_id_str)
-        sender_obj_id = ObjectId(sender_id_str)
-    except Exception as e:
-        app.logger.error(f"Socket Error: Invalid ObjectId in send_message data: {e}", exc_info=True)
-        return
+        room_id_obj = ObjectId(room_id_str)
+        sender_id_obj = ObjectId(sender_id_str)
 
-    new_message = {
-        "room_id": room_obj_id,
-        "sender_id": sender_obj_id,
-        "sender_type": sender_type,
-        "message": message_content,
-        "type": message_type,
-        "timestamp": datetime.now(timezone.utc),
-        "is_read": False # Initialize is_read to False
-    }
-    
-    try:
+        new_message = {
+            "room_id": room_id_obj,
+            "sender_id": sender_id_obj,
+            "sender_type": sender_type,
+            "message": message_content,
+            "type": message_type,
+            "timestamp": current_time,
+            "is_read": False # Default to unread
+        }
+        # Get sender's profile image URL
+        sender_profile_image_url = None
+        if sender_type == 'user':
+            sender_doc = users_col.find_one({"_id": sender_id_obj}, {"profile_image_url": 1})
+            if sender_doc:
+                sender_profile_image_url = sender_doc.get("profile_image_url")
+        elif sender_type == 'admin':
+            sender_doc = admins_col.find_one({"_id": sender_id_obj}, {"profile_image_url": 1})
+            if sender_doc:
+                sender_profile_image_url = sender_doc.get("profile_image_url")
+        if sender_profile_image_url:
+            new_message['sender_profile_image_url'] = sender_profile_image_url
+
+
         result = messages_col.insert_one(new_message)
-        inserted_message_doc = messages_col.find_one({"_id": result.inserted_id})
-        
-        rooms_col.update_one(
-            {"_id": room_obj_id},
-            {"$set": {"updated_at": datetime.now(timezone.utc)}}
-        )
+        # --- START OF CRITICAL CHANGES ---
+        # Update the new_message dictionary with the actual MongoDB _id
+        new_message['_id'] = result.inserted_id 
+        app.logger.info(f"Socket: Message inserted with actual MongoDB ID: {new_message['_id']}")
 
-        # Include the original temp_id in the serialized message if it exists
-        serialized_msg = serialize_doc_for_json(inserted_message_doc)
+        # Serialize the message for JSON response
+        serialized_message_for_sender = serialize_doc_for_json(new_message)
+
+        # Add the temporary ID back to the serialized message for the sender ONLY
         if temp_id:
-            serialized_msg['_id'] = temp_id # Replace the actual _id with temp_id for client-side matching
+            serialized_message_for_sender['temp_id'] = temp_id 
+            app.logger.info(f"Socket: Added temp_id {temp_id} to serialized message for sender.")
 
-        room_doc = rooms_col.find_one({"_id": room_obj_id})
-        if room_doc and 'members' in room_doc:
-            for member in room_doc['members']:
-                member_id_obj = member['id']
-                member_id_str = str(member_id_obj)
+        app.logger.info(f"Socket: Emitting receive_message to sender {request.sid} with data: {serialized_message_for_sender}")
+        emit('receive_message', serialized_message_for_sender, room=request.sid)
 
-                # Emit 'receive_message' to all members of the room (including sender)
-                # This ensures everyone gets the message, and the sender can update their optimistic message
-                socketio.emit('receive_message', serialized_msg, room=member_id_str)
-                app.logger.info(f"Socket: Emitted 'receive_message' for msg {serialized_msg['_id']} to room {member_id_str}")
+        # For other members in the room, emit 'new_message'
+        # They don't need temp_id, so create a copy and remove it if present
+        serialized_message_for_others = serialize_doc_for_json(new_message) # Re-serialize to ensure no temp_id is carried over
+        if 'temp_id' in serialized_message_for_others: # This check might be redundant if serialize_doc_for_json doesn't include it, but good for safety
+            del serialized_message_for_others['temp_id'] 
+            app.logger.info("Socket: Removed temp_id from message for other recipients.")
 
-                # Emit 'new_message' specifically for unread count increment for the recipient
-                if member_id_str != sender_id_str: # Only for the recipient, not the sender
-                    read_status = reads_col.find_one({"user_id": member_id_obj, "room_id": room_obj_id})
-                    is_muted_for_recipient = read_status.get('is_muted', False) if read_status else False
-
-                    if not is_muted_for_recipient:
-                        socketio.emit('new_message', serialized_msg, room=member_id_str)
-                        app.logger.info(f"Socket: Emitted 'new_message' for msg {serialized_msg['_id']} to room {member_id_str} (unread for {member_id_str})")
-                        reads_col.update_one(
-                            {"user_id": member_id_obj, "room_id": room_obj_id},
-                            {"$inc": {"unread_count": 1}},
-                            upsert=True
-                        )
-                        app.logger.info(f"Socket: Incremented unread count for user {member_id_str} in room {room_id_str}")
-                    else:
-                        app.logger.info(f"Socket: New message for user {member_id_str} in room {room_id_str} but chat is muted. Not incrementing unread count or emitting 'new_message'.")
-        else:
-            app.logger.warning(f"Socket Warning: Room {room_id_str} not found or no members for message broadcast.")
+        app.logger.info(f"Socket: Emitting new_message to room {room_id_str} (excluding sender) with data: {serialized_message_for_others}")
+        socketio.emit('new_message', serialized_message_for_others, room=room_id_str, skip_sid=request.sid)
+        # --- END OF CRITICAL CHANGES ---
 
     except Exception as e:
-        app.logger.error(f"Socket Error: Error sending message or broadcasting: {e}", exc_info=True)
-
-
-@socketio.on('typing')
-def on_typing(data):
-    room_id_str = data.get("room_id")
-    user_id_str = data.get("user_id")
-    if room_id_str and user_id_str:
-        try:
-            room_obj_id = ObjectId(room_id_str)
-            room_doc = rooms_col.find_one({"_id": room_obj_id})
-            if room_doc and 'members' in room_doc:
-                for member in room_doc['members']:
-                    member_id_str = str(member['id'])
-                    if member_id_str != user_id_str:
-                        emit('typing', {'user_id': user_id_str}, room=member_id_str)
-                        app.logger.info(f"Socket: Typing event from {user_id_str} to {member_id_str} in room {room_id_str}")
-        except Exception as e:
-            app.logger.error(f"Socket Error: Error handling typing event: {e}", exc_info=True)
-
-
-@socketio.on('stop_typing')
-def on_stop_typing(data):
-    room_id_str = data.get("room_id")
-    user_id_str = data.get("user_id")
-    if room_id_str and user_id_str:
-        try:
-            room_obj_id = ObjectId(room_id_str)
-            room_doc = rooms_col.find_one({"_id": room_obj_id})
-            if room_doc and 'members' in room_doc:
-                for member in room_doc['members']:
-                    member_id_str = str(member['id'])
-                    if member_id_str != user_id_str:
-                        emit('stop_typing', {'user_id': user_id_str}, room=member_id_str)
-                        app.logger.info(f"Socket: Stop Typing event from {user_id_str} to {member_id_str} in room {room_id_str}")
-        except Exception as e:
-            app.logger.error(f"Socket Error: Error handling stop_typing event: {e}", exc_info=True)
-
+        app.logger.error(f"Socket Error: Failed to send message: {e}", exc_info=True)
+        # Emit an error back to the sender if message sending failed
+        emit('message_error', {'temp_id': temp_id, 'error': str(e)}, room=request.sid)
 
 if __name__ == '__main__':
-    import eventlet
-    import eventlet.wsgi
-    app.logger.info("Starting production server on http://0.0.0.0:8080")
-    socketio.run(app, host='0.0.0.0', port=8080)
-
+    # When running with `python app.py`, eventlet is not automatically used unless specified.
+    # For production, use gunicorn with eventlet workers: gunicorn -k eventlet -w 1 "app:socketio" --bind 0.0.0.0:8080
+    app.logger.info("Starting Flask app with Socket.IO...")
+    socketio.run(app, host='0.0.0.0', port=8080, debug=True)
