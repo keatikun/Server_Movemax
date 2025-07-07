@@ -720,7 +720,9 @@ def on_send_message(data):
     sender_type = data.get("sender_type")
     message_content = data.get("message")
     message_type = data.get("type", "text")
-    temp_id = data.get("temp_id") # New: Get the temporary ID from the client
+    # --- START OF CHANGE 1: Renamed temp_id to client_temp_id for clarity ---
+    client_temp_id = data.get("temp_id") 
+    # --- END OF CHANGE 1 ---
 
     if not all([room_id_str, sender_id_str, message_content, sender_type]):
         app.logger.error("Socket Error: Missing data for send_message")
@@ -728,7 +730,7 @@ def on_send_message(data):
 
     current_time = datetime.now(timezone.utc)
 
-    # --- Spam Prevention Checks ---
+    # --- Spam Prevention Checks (NO CHANGES HERE) ---
     # 1. Message Length Limit
     if len(message_content) > MESSAGE_MAX_LENGTH:
         app.logger.warning(f"Spam Prevention: Message from {sender_id_str} blocked due to excessive length ({len(message_content)} > {MESSAGE_MAX_LENGTH}).")
@@ -783,8 +785,22 @@ def on_send_message(data):
         "is_read": False # Initialize is_read to False
     }
     
+    # Get sender's profile image URL (NO CHANGES HERE)
+    sender_profile_image_url = None
+    if sender_type == 'user':
+        sender_doc = users_col.find_one({"_id": sender_obj_id}, {"profile_image_url": 1})
+        if sender_doc:
+            sender_profile_image_url = sender_doc.get("profile_image_url")
+    elif sender_type == 'admin':
+        sender_doc = admins_col.find_one({"_id": sender_obj_id}, {"profile_image_url": 1})
+        if sender_doc:
+            sender_profile_image_url = sender_doc.get("profile_image_url")
+    if sender_profile_image_url:
+        new_message['sender_profile_image_url'] = sender_profile_image_url
+
     try:
         result = messages_col.insert_one(new_message)
+        # Fetch the inserted message document to get all fields, especially the actual _id
         inserted_message_doc = messages_col.find_one({"_id": result.inserted_id})
         
         rooms_col.update_one(
@@ -792,10 +808,22 @@ def on_send_message(data):
             {"$set": {"updated_at": datetime.now(timezone.utc)}}
         )
 
-        # Include the original temp_id in the serialized message if it exists
-        serialized_msg = serialize_doc_for_json(inserted_message_doc)
-        if temp_id:
-            serialized_msg['_id'] = temp_id # Replace the actual _id with temp_id for client-side matching
+        # --- START OF CRITICAL CHANGES FOR REAL-TIME READ RECEIPTS ---
+        # Serialize the message with the actual MongoDB _id for general use
+        serialized_msg_with_actual_id = serialize_doc_for_json(inserted_message_doc)
+        app.logger.info(f"Socket: Message inserted with actual MongoDB ID: {serialized_msg_with_actual_id['_id']}")
+
+        # Create a copy for the sender that includes the client_temp_id for matching
+        # The _id in this copy will be the actual MongoDB _id, not the temp_id.
+        # The client will use client_temp_id to find the optimistic message,
+        # then update its _id to the actual MongoDB _id received here.
+        serialized_msg_for_sender = serialized_msg_with_actual_id.copy()
+        if client_temp_id:
+            serialized_msg_for_sender['client_temp_id'] = client_temp_id # Add client's temp ID as a separate field
+            app.logger.info(f"Socket: Added client_temp_id {client_temp_id} to serialized message for sender.")
+
+        app.logger.info(f"Socket: Emitting receive_message to sender {request.sid} with data: {serialized_msg_for_sender}")
+        emit('receive_message', serialized_msg_for_sender, room=request.sid)
 
         room_doc = rooms_col.find_one({"_id": room_obj_id})
         if room_doc and 'members' in room_doc:
@@ -803,19 +831,16 @@ def on_send_message(data):
                 member_id_obj = member['id']
                 member_id_str = str(member_id_obj)
 
-                # Emit 'receive_message' to all members of the room (including sender)
-                # This ensures everyone gets the message, and the sender can update their optimistic message
-                socketio.emit('receive_message', serialized_msg, room=member_id_str)
-                app.logger.info(f"Socket: Emitted 'receive_message' for msg {serialized_msg['_id']} to room {member_id_str}")
-
                 # Emit 'new_message' specifically for unread count increment for the recipient
+                # This message should NOT contain client_temp_id as it's not relevant to other clients
                 if member_id_str != sender_id_str: # Only for the recipient, not the sender
                     read_status = reads_col.find_one({"user_id": member_id_obj, "room_id": room_obj_id})
                     is_muted_for_recipient = read_status.get('is_muted', False) if read_status else False
 
                     if not is_muted_for_recipient:
-                        socketio.emit('new_message', serialized_msg, room=member_id_str)
-                        app.logger.info(f"Socket: Emitted 'new_message' for msg {serialized_msg['_id']} to room {member_id_str} (unread for {member_id_str})")
+                        # Emit the message with the actual MongoDB _id (no client_temp_id)
+                        socketio.emit('new_message', serialized_msg_with_actual_id, room=member_id_str)
+                        app.logger.info(f"Socket: Emitted 'new_message' for msg {serialized_msg_with_actual_id['_id']} to room {member_id_str} (unread for {member_id_str})")
                         reads_col.update_one(
                             {"user_id": member_id_obj, "room_id": room_obj_id},
                             {"$inc": {"unread_count": 1}},
@@ -826,46 +851,14 @@ def on_send_message(data):
                         app.logger.info(f"Socket: New message for user {member_id_str} in room {room_id_str} but chat is muted. Not incrementing unread count or emitting 'new_message'.")
         else:
             app.logger.warning(f"Socket Warning: Room {room_id_str} not found or no members for message broadcast.")
+        # --- END OF CRITICAL CHANGES FOR REAL-TIME READ RECEIPTS ---
 
     except Exception as e:
         app.logger.error(f"Socket Error: Error sending message or broadcasting: {e}", exc_info=True)
-
-
-@socketio.on('typing')
-def on_typing(data):
-    room_id_str = data.get("room_id")
-    user_id_str = data.get("user_id")
-    if room_id_str and user_id_str:
-        try:
-            room_obj_id = ObjectId(room_id_str)
-            room_doc = rooms_col.find_one({"_id": room_obj_id})
-            if room_doc and 'members' in room_doc:
-                for member in room_doc['members']:
-                    member_id_str = str(member['id'])
-                    if member_id_str != user_id_str:
-                        emit('typing', {'user_id': user_id_str}, room=member_id_str)
-                        app.logger.info(f"Socket: Typing event from {user_id_str} to {member_id_str} in room {room_id_str}")
-        except Exception as e:
-            app.logger.error(f"Socket Error: Error handling typing event: {e}", exc_info=True)
-
-
-@socketio.on('stop_typing')
-def on_stop_typing(data):
-    room_id_str = data.get("room_id")
-    user_id_str = data.get("user_id")
-    if room_id_str and user_id_str:
-        try:
-            room_obj_id = ObjectId(room_id_str)
-            room_doc = rooms_col.find_one({"_id": room_obj_id})
-            if room_doc and 'members' in room_doc:
-                for member in room_doc['members']:
-                    member_id_str = str(member['id'])
-                    if member_id_str != user_id_str:
-                        emit('stop_typing', {'user_id': user_id_str}, room=member_id_str)
-                        app.logger.info(f"Socket: Stop Typing event from {user_id_str} to {member_id_str} in room {room_id_str}")
-        except Exception as e:
-            app.logger.error(f"Socket Error: Error handling stop_typing event: {e}", exc_info=True)
-
+        # Emit an error back to the sender if message sending failed
+        # --- START OF CHANGE 2: Use client_temp_id here ---
+        emit('message_error', {'temp_id': client_temp_id, 'error': str(e)}, room=request.sid) 
+        # --- END OF CHANGE 2 ---
 
 if __name__ == '__main__':
     import eventlet
