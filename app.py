@@ -720,9 +720,7 @@ def on_send_message(data):
     sender_type = data.get("sender_type")
     message_content = data.get("message")
     message_type = data.get("type", "text")
-    # --- START OF CHANGE 1: Renamed temp_id to client_temp_id for clarity ---
     client_temp_id = data.get("temp_id") 
-    # --- END OF CHANGE 1 ---
 
     if not all([room_id_str, sender_id_str, message_content, sender_type]):
         app.logger.error("Socket Error: Missing data for send_message")
@@ -775,7 +773,7 @@ def on_send_message(data):
         app.logger.error(f"Socket Error: Invalid ObjectId in send_message data: {e}", exc_info=True)
         return
 
-    new_message = {
+    new_message_doc = { # Renamed to new_message_doc for clarity
         "room_id": room_obj_id,
         "sender_id": sender_obj_id,
         "sender_type": sender_type,
@@ -796,10 +794,10 @@ def on_send_message(data):
         if sender_doc:
             sender_profile_image_url = sender_doc.get("profile_image_url")
     if sender_profile_image_url:
-        new_message['sender_profile_image_url'] = sender_profile_image_url
+        new_message_doc['sender_profile_image_url'] = sender_profile_image_url
 
     try:
-        result = messages_col.insert_one(new_message)
+        result = messages_col.insert_one(new_message_doc)
         # Fetch the inserted message document to get all fields, especially the actual _id
         inserted_message_doc = messages_col.find_one({"_id": result.inserted_id})
         
@@ -808,22 +806,9 @@ def on_send_message(data):
             {"$set": {"updated_at": datetime.now(timezone.utc)}}
         )
 
-        # --- START OF CRITICAL CHANGES FOR REAL-TIME READ RECEIPTS ---
         # Serialize the message with the actual MongoDB _id for general use
-        serialized_msg_with_actual_id = serialize_doc_for_json(inserted_message_doc)
-        app.logger.info(f"Socket: Message inserted with actual MongoDB ID: {serialized_msg_with_actual_id['_id']}")
-
-        # Create a copy for the sender that includes the client_temp_id for matching
-        # The _id in this copy will be the actual MongoDB _id, not the temp_id.
-        # The client will use client_temp_id to find the optimistic message,
-        # then update its _id to the actual MongoDB _id received here.
-        serialized_msg_for_sender = serialized_msg_with_actual_id.copy()
-        if client_temp_id:
-            serialized_msg_for_sender['client_temp_id'] = client_temp_id # Add client's temp ID as a separate field
-            app.logger.info(f"Socket: Added client_temp_id {client_temp_id} to serialized message for sender.")
-
-        app.logger.info(f"Socket: Emitting receive_message to sender {request.sid} with data: {serialized_msg_for_sender}")
-        emit('receive_message', serialized_msg_for_sender, room=request.sid)
+        serialized_message_for_all = serialize_doc_for_json(inserted_message_doc)
+        app.logger.info(f"Socket: Message inserted with actual MongoDB ID: {serialized_message_for_all['_id']}")
 
         room_doc = rooms_col.find_one({"_id": room_obj_id})
         if room_doc and 'members' in room_doc:
@@ -831,16 +816,35 @@ def on_send_message(data):
                 member_id_obj = member['id']
                 member_id_str = str(member_id_obj)
 
-                # Emit 'new_message' specifically for unread count increment for the recipient
-                # This message should NOT contain client_temp_id as it's not relevant to other clients
-                if member_id_str != sender_id_str: # Only for the recipient, not the sender
+                # --- START OF CRITICAL CHANGE FOR REAL-TIME DISPLAY ---
+                # Prepare message data for this specific member
+                message_to_emit = serialized_message_for_all.copy()
+
+                if member_id_str == sender_id_str:
+                    # For the sender, include client_temp_id for optimistic update matching
+                    if client_temp_id:
+                        message_to_emit['client_temp_id'] = client_temp_id
+                        app.logger.info(f"Socket: Emitting 'receive_message' to sender {request.sid} with client_temp_id {client_temp_id} and actual ID {message_to_emit['_id']}")
+                    else:
+                        app.logger.info(f"Socket: Emitting 'receive_message' to sender {request.sid} with actual ID {message_to_emit['_id']}")
+                    emit('receive_message', message_to_emit, room=request.sid)
+                else:
+                    # For other recipients, ensure client_temp_id is NOT present
+                    if 'client_temp_id' in message_to_emit:
+                        del message_to_emit['client_temp_id']
+                    
                     read_status = reads_col.find_one({"user_id": member_id_obj, "room_id": room_obj_id})
                     is_muted_for_recipient = read_status.get('is_muted', False) if read_status else False
 
                     if not is_muted_for_recipient:
-                        # Emit the message with the actual MongoDB _id (no client_temp_id)
-                        socketio.emit('new_message', serialized_msg_with_actual_id, room=member_id_str)
-                        app.logger.info(f"Socket: Emitted 'new_message' for msg {serialized_msg_with_actual_id['_id']} to room {member_id_str} (unread for {member_id_str})")
+                        # Emit 'receive_message' to the recipient as well
+                        app.logger.info(f"Socket: Emitting 'receive_message' to recipient room {member_id_str} for message {message_to_emit['_id']}")
+                        socketio.emit('receive_message', message_to_emit, room=member_id_str)
+                        
+                        # Also emit 'new_message' for unread count increment for the recipient's chat list
+                        app.logger.info(f"Socket: Emitting 'new_message' for room {room_id_str} to recipient {member_id_str} for unread count update.")
+                        socketio.emit('new_message', {'room_id': room_id_str, 'sender_id': sender_id_str}, room=member_id_str)
+                        
                         reads_col.update_one(
                             {"user_id": member_id_obj, "room_id": room_obj_id},
                             {"$inc": {"unread_count": 1}},
@@ -848,17 +852,15 @@ def on_send_message(data):
                         )
                         app.logger.info(f"Socket: Incremented unread count for user {member_id_str} in room {room_id_str}")
                     else:
-                        app.logger.info(f"Socket: New message for user {member_id_str} in room {room_id_str} but chat is muted. Not incrementing unread count or emitting 'new_message'.")
+                        app.logger.info(f"Socket: New message for user {member_id_str} in room {room_id_str} but chat is muted. Not emitting 'receive_message' or incrementing unread count.")
+                # --- END OF CRITICAL CHANGE FOR REAL-TIME DISPLAY ---
         else:
             app.logger.warning(f"Socket Warning: Room {room_id_str} not found or no members for message broadcast.")
-        # --- END OF CRITICAL CHANGES FOR REAL-TIME READ RECEIPTS ---
 
     except Exception as e:
         app.logger.error(f"Socket Error: Error sending message or broadcasting: {e}", exc_info=True)
         # Emit an error back to the sender if message sending failed
-        # --- START OF CHANGE 2: Use client_temp_id here ---
         emit('message_error', {'temp_id': client_temp_id, 'error': str(e)}, room=request.sid) 
-        # --- END OF CHANGE 2 ---
 
 if __name__ == '__main__':
     import eventlet
