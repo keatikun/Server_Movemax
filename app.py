@@ -208,6 +208,7 @@ def get_last_messages_for_user(user_id):
                 response_data[chat_partner_id] = serialize_doc_for_json(last_message_doc)
         
         app.logger.info(f"API Success: Fetched last messages for user {user_id}. Count: {len(response_data)}")
+        app.logger.debug(f"API Debug: Last messages data: {response_data}") # ADDED LOG
         return jsonify(response_data), 200
 
     except Exception as e:
@@ -223,6 +224,7 @@ def get_all_user_statuses():
         for status in statuses:
             serialized_statuses[str(status['user_id'])] = serialize_doc_for_json(status)
         app.logger.info(f"API Success: Fetched {len(serialized_statuses)} user statuses.")
+        app.logger.debug(f"API Debug: All user statuses data: {serialized_statuses}") # ADDED LOG
         return jsonify(serialized_statuses), 200
     except Exception as e:
         app.logger.error(f"API Error: Failed to fetch all user statuses: {e}", exc_info=True)
@@ -284,6 +286,7 @@ def get_last_messages_for_admin_conversations(admin_id):
                 response_data[chat_partner_id] = serialize_doc_for_json(last_message_doc)
         
         app.logger.info(f"API Success: Fetched last messages for admin {admin_id}. Count: {len(response_data)}")
+        app.logger.debug(f"API Debug: Last messages for admin data: {response_data}") # ADDED LOG
         return jsonify(response_data), 200
 
     except Exception as e:
@@ -329,6 +332,7 @@ def get_user_room_mappings(user_id):
             if res.get('chat_partner_id') and res.get('room_id'):
                 room_mappings[res['chat_partner_id']] = res['room_id']
         app.logger.info(f"API Success: Fetched room mappings for user {user_id}. Count: {len(room_mappings)}")
+        app.logger.debug(f"API Debug: User room mappings data: {room_mappings}") # ADDED LOG
         return jsonify(room_mappings), 200
     except Exception as e:
         app.logger.error(f"API Error: Failed to fetch room mappings for user {user_id}: {e}", exc_info=True)
@@ -405,6 +409,7 @@ def get_unread_counts(user_id):
             }
 
         app.logger.info(f"API Success: Fetched unread counts and chat settings for user {user_id}: {unread_counts_and_settings}")
+        app.logger.debug(f"API Debug: Unread counts and settings data: {unread_counts_and_settings}") # ADDED LOG
         return jsonify(unread_counts_and_settings), 200
 
     except Exception as e:
